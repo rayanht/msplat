@@ -1,0 +1,172 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  version-check:
+    name: Version sync
+    runs-on: macos-15
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify versions match and tag is correct
+        id: check
+        run: |
+          V_FILE=$(cat VERSION | tr -d '[:space:]')
+          V_TOML=$(grep '^version = ' pyproject.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          V_INIT=$(grep '^__version__ = ' python/msplat/__init__.py | sed 's/__version__ = "\(.*\)"/\1/')
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "VERSION:      $V_FILE"
+          echo "pyproject:    $V_TOML"
+          echo "__init__.py:  $V_INIT"
+          echo "tag:          $TAG"
+          if [ "$V_FILE" != "$V_TOML" ] || [ "$V_FILE" != "$V_INIT" ]; then
+            echo "::error::Version mismatch across VERSION, pyproject.toml, __init__.py"
+            exit 1
+          fi
+          if [ "$TAG" != "$V_FILE" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match VERSION ($V_FILE)"
+            exit 1
+          fi
+          echo "version=$V_FILE" >> "$GITHUB_OUTPUT"
+
+  build-cpp:
+    name: C++ CLI
+    runs-on: macos-15
+    needs: version-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache CMake deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: cmake-deps-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-cli
+          path: build/msplat
+          if-no-files-found: error
+
+  build-python:
+    name: Python ${{ matrix.python }} wheel
+    runs-on: macos-15
+    needs: version-check
+    strategy:
+      matrix:
+        python: ["3.12", "3.13"]
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Cache CMake deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: cmake-deps-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Build wheel
+        run: uv build --wheel --python ${{ matrix.python }}
+
+      - name: Test
+        run: |
+          uv venv .test-venv --python ${{ matrix.python }}
+          WHEEL=$(ls dist/*.whl)
+          uv pip install --python .test-venv/bin/python "${WHEEL}" pytest
+          .test-venv/bin/python -m pytest tests/ -x -v
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-wheel-py${{ matrix.python }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  build-swift:
+    name: Swift XCFramework
+    runs-on: macos-15
+    needs: version-check
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Cache CMake deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: cmake-deps-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Build XCFramework
+        run: bash scripts/build-xcframework.sh
+
+      - name: Build & test
+        run: |
+          cd swift
+          swift build
+          swift test
+
+      - name: Zip XCFramework
+        run: zip -r MsplatCore.xcframework.zip MsplatCore.xcframework
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-xcframework
+          path: MsplatCore.xcframework.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    needs: [version-check, build-cpp, build-python, build-swift]
+    environment: release
+    env:
+      VERSION: ${{ needs.version-check.outputs.version }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: v${{ env.VERSION }}
+          generate_release_notes: true
+          files: |
+            artifacts/release-cli/msplat
+            artifacts/release-xcframework/MsplatCore.xcframework.zip
+            artifacts/release-wheel-py3.12/*.whl
+            artifacts/release-wheel-py3.13/*.whl
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: artifacts/release-wheel-py3.12/
+
+      - name: Publish to PyPI (3.13)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: artifacts/release-wheel-py3.13/

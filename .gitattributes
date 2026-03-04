@@ -1,0 +1,4 @@
+datasets/mipnerf360/garden/**/*.JPG filter=lfs diff=lfs merge=lfs -text
+datasets/mipnerf360/garden/**/*.jpg filter=lfs diff=lfs merge=lfs -text
+datasets/mipnerf360/garden/**/*.png filter=lfs diff=lfs merge=lfs -text
+datasets/mipnerf360/garden/**/*.bin filter=lfs diff=lfs merge=lfs -text

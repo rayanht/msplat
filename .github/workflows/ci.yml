@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  version-check:
+    name: Version sync
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify VERSION, pyproject.toml, __init__.py match
+        run: |
+          V_FILE=$(cat VERSION | tr -d '[:space:]')
+          V_TOML=$(grep '^version = ' pyproject.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          V_INIT=$(grep '^__version__ = ' python/msplat/__init__.py | sed 's/__version__ = "\(.*\)"/\1/')
+          echo "VERSION:      $V_FILE"
+          echo "pyproject:    $V_TOML"
+          echo "__init__.py:  $V_INIT"
+          if [ "$V_FILE" != "$V_TOML" ] || [ "$V_FILE" != "$V_INIT" ]; then
+            echo "::error::Version mismatch — update VERSION, pyproject.toml, and __init__.py"
+            exit 1
+          fi
+
+  build-cpp:
+    name: C++ CLI
+    runs-on: macos-15
+    needs: version-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache CMake deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: cmake-deps-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+
+      - name: Verify outputs
+        run: |
+          test -f build/msplat
+          test -f build/libmsplat_core.a
+          test -f build/default.metallib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msplat-cli
+          path: build/msplat
+          if-no-files-found: error
+          retention-days: 7
+
+  build-test-python:
+    name: Python ${{ matrix.python }}
+    runs-on: macos-15
+    needs: version-check
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Cache CMake deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: cmake-deps-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Build wheel
+        run: uv build --wheel --python ${{ matrix.python }}
+
+      - name: Install and test
+        run: |
+          uv venv .test-venv --python ${{ matrix.python }}
+          WHEEL=$(ls dist/*.whl)
+          uv pip install --python .test-venv/bin/python "${WHEEL}" pytest
+          .test-venv/bin/python -m pytest tests/ -x -v
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-py${{ matrix.python }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  build-test-swift:
+    name: Swift Package
+    runs-on: macos-15
+    needs: version-check
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Cache CMake deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: cmake-deps-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Build XCFramework
+        run: bash scripts/build-xcframework.sh
+
+      - name: Build & test
+        run: |
+          cd swift
+          swift build
+          swift test

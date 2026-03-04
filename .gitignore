@@ -1,0 +1,44 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.dylib
+*.air
+*.metallib
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+.venv/
+uv.lock
+
+# Swift
+swift/.build/
+MsplatCore.xcframework/
+swift/Sources/Msplat/Resources/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Spec (internal)
+SPEC.md
+
+# Datasets (keep garden for CI, ignore others)
+datasets/*/
+!datasets/mipnerf360/
+datasets/mipnerf360/*/
+!datasets/mipnerf360/garden/
+
+# Training outputs
+*.splat
+*.msplat
+cameras.json
+/output/
+*.ply

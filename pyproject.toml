@@ -1,0 +1,39 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "msplat"
+version = "1.0.0"
+description = "Metal-accelerated 3D Gaussian Splatting for Apple Silicon"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = ["numpy"]
+authors = [{ name = "Rayan Hatout" }]
+keywords = ["gaussian-splatting", "3dgs", "metal", "apple-silicon", "nerf"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Multimedia :: Graphics :: 3D Rendering",
+]
+
+[project.urls]
+Homepage = "https://github.com/rayanht/metal-splat"
+Repository = "https://github.com/rayanht/metal-splat"
+Issues = "https://github.com/rayanht/metal-splat/issues"
+
+[project.optional-dependencies]
+cli = ["tyro"]
+
+[project.scripts]
+msplat-train = "msplat.cli:main"
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+cmake.args = ["-DMSPLAT_BUILD_PYTHON=ON"]
+wheel.packages = ["python/msplat"]
