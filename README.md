@@ -151,14 +151,16 @@ mipnerf360, M4 Max. msplat runs 7K iterations with no downscales:
 msplat-train path/to/scene -n 7000 --num-downscales 0 --eval
 ```
 
-| Scene | msplat PSNR | msplat SSIM | Wall time | gsplat PSNR (30K) | gsplat SSIM (30K) |
-|-------|-------------|-------------|-----------|-------------------|-------------------|
-| bicycle | 23.21 | 0.605 | 82s | 25.22 | 0.764 |
-| counter | 27.44 | 0.881 | 91s | 29.02 | 0.907 |
-| garden | 25.76 | 0.786 | 107s | 27.32 | 0.865 |
-| room | 30.21 | 0.898 | 85s | 31.36 | 0.918 |
+| Scene | msplat PSNR | msplat SSIM | msplat wall time | gsplat PSNR | gsplat SSIM | gsplat wall time
+|-------|-------------|-------------|-----------|-------------|-------------|-------------|
+| bicycle | 23.21 | 0.605 | 82s | 23.71 | 0.668 | ~335s
+| counter | 27.44 | 0.881 | 91s | 27.14 | 0.878 | ~335s
+| garden | 25.76 | 0.786 | 107s | 26.30 | 0.833 | ~335s
+| room | 30.21 | 0.898 | 85s | 29.21 | 0.893 | ~335s
 
-gsplat numbers from [docs.gsplat.studio](https://docs.gsplat.studio/main/tests/eval.html) (30K iterations, TITAN RTX).
+gsplat numbers from [docs.gsplat.studio](https://docs.gsplat.studio/main/tests/eval.html) (7K iterations, TITAN RTX). 
+
+**Note:** gsplat have not published wall times for individual mipnerf360 scenes, ~335s is the reported average across *all* mipnerf360 scenes.
 
 ## License
 
