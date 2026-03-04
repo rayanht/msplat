@@ -158,9 +158,20 @@ msplat-train path/to/scene -n 7000 --num-downscales 0 --eval
 | garden | 25.76 | 0.786 | 107s | 26.30 | 0.833 | ~335s
 | room | 30.21 | 0.898 | 85s | 29.21 | 0.893 | ~335s
 
-gsplat numbers from [docs.gsplat.studio](https://docs.gsplat.studio/main/tests/eval.html) (7K iterations, TITAN RTX). 
+### 30K iterations (garden)
 
-**Note:** gsplat have not published wall times for individual mipnerf360 scenes, ~335s is the reported average across *all* mipnerf360 scenes.
+```bash
+msplat-train path/to/garden -n 30000 --num-downscales 0 --eval
+```
+
+| | msplat | gsplat |
+|---|---|---|
+| PSNR | 27.17 | 27.32 |
+| SSIM | 0.854 | 0.865 |
+| Gaussians | 3.55M | — |
+| Wall time | 1039s | ~2149s |
+
+gsplat numbers from [docs.gsplat.studio](https://docs.gsplat.studio/main/tests/eval.html) (TITAN RTX). gsplat wall times are the reported average across *all* mipnerf360 scenes (per-scene times not published).
 
 ## License
 
