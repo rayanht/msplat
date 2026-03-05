@@ -65,13 +65,13 @@ struct PixelBuffer {
     }
     PixelBuffer& operator=(PixelBuffer&& o) {
         if (this != &o) {
-            delete[] data;
+            free(data);
             data = o.data; width = o.width; height = o.height;
             o.data = nullptr;
         }
         return *this;
     }
-    ~PixelBuffer() { delete[] data; }
+    ~PixelBuffer() { free(data); }
 };
 
 // ── Dataset ─────────────────────────────────────────────────────────────────

@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.1.1
+
+- Fixed `new[]`/`free()` mismatch in C API pixel buffer allocation — undefined
+  behavior when Swift or other C callers freed render output with `free()`.
+  Allocation now uses `malloc` consistently.
+- Updated type stubs (`_core.pyi`) with `camera_pose` and `render_from_pose`
+  methods added in v1.1.
+
 ## v1.1 — Arbitrary viewpoint rendering
 
 - **`renderFromPose` API** — render from any camera-to-world matrix, not just dataset cameras.

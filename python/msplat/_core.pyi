@@ -85,6 +85,10 @@ class Dataset:
         """Number of test cameras (0 unless eval_mode=True)."""
         ...
 
+    def camera_pose(self, index: int) -> NDArray[np.float32]:
+        """Get camera-to-world pose (4x4 row-major, OpenGL convention) as numpy array."""
+        ...
+
 class GaussianTrainer:
     """3D Gaussian Splatting trainer. All computation runs on the Metal GPU."""
 
@@ -115,6 +119,17 @@ class GaussianTrainer:
         use_test: bool = False,
     ) -> NDArray[np.float32]:
         """Render a camera view. Returns a numpy array of shape (H, W, 3), float32, RGB [0,1]."""
+        ...
+
+    def render_from_pose(
+        self,
+        cam_to_world: NDArray[np.float32],
+        ref_cam_idx: int = 0,
+    ) -> NDArray[np.float32]:
+        """Render from an arbitrary camera-to-world pose (4x4 row-major, OpenGL convention).
+
+        Uses intrinsics from ref_cam_idx. Returns numpy (H, W, 3) float32.
+        """
         ...
 
     def export_ply(self, path: str) -> None:

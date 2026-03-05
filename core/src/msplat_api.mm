@@ -178,7 +178,8 @@ PixelBuffer Trainer::render(int cameraIndex, bool useTest) {
 
     int h = (int)rgbCpu.size(0);
     int w = (int)rgbCpu.size(1);
-    float* buf = new float[h * w * 3];
+    // Use malloc so callers can free() — PixelBuffer destructor handles both
+    float* buf = (float*)malloc(h * w * 3 * sizeof(float));
     memcpy(buf, rgbCpu.data_ptr(), h * w * 3 * sizeof(float));
 
     return PixelBuffer(buf, w, h);
@@ -201,7 +202,7 @@ PixelBuffer Trainer::renderFromPose(const float camToWorld[16], int refCameraInd
 
     int h = (int)rgbCpu.size(0);
     int w = (int)rgbCpu.size(1);
-    float* buf = new float[h * w * 3];
+    float* buf = (float*)malloc(h * w * 3 * sizeof(float));
     memcpy(buf, rgbCpu.data_ptr(), h * w * 3 * sizeof(float));
     return PixelBuffer(buf, w, h);
 }

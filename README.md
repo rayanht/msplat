@@ -105,7 +105,7 @@ Requires Xcode and CMake (`brew install cmake`).
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/rayanht/metal-splat.git", from: "1.1.0")
+    .package(url: "https://github.com/rayanht/msplat.git", from: "1.1.0")
 ]
 ```
 
@@ -144,7 +144,7 @@ cmake --build build -j
 ### Build from source
 
 ```bash
-git clone https://github.com/rayanht/metal-splat.git && cd metal-splat
+git clone https://github.com/rayanht/msplat.git && cd msplat
 
 # Python
 pip install -e .

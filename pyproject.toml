@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "msplat"
-version = "1.1.0"
+version = "1.1.1"
 description = "Metal-accelerated 3D Gaussian Splatting for Apple Silicon"
 readme = "README.md"
 license = "Apache-2.0"
@@ -23,9 +23,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/rayanht/metal-splat"
-Repository = "https://github.com/rayanht/metal-splat"
-Issues = "https://github.com/rayanht/metal-splat/issues"
+Homepage = "https://github.com/rayanht/msplat"
+Repository = "https://github.com/rayanht/msplat"
+Issues = "https://github.com/rayanht/msplat/issues"
 
 [project.optional-dependencies]
 cli = ["tyro"]
