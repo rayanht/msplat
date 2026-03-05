@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.2
+
+- Added `py.typed` marker (PEP 561) — type checkers now discover stubs automatically
+- `TrainingConfig(bg_color=...)` now raises `ValueError` on wrong-size lists instead
+  of silently falling back to the default
+
 ## v1.1.1
 
 - Fixed `new[]`/`free()` mismatch in C API pixel buffer allocation — undefined

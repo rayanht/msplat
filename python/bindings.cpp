@@ -314,7 +314,9 @@ NB_MODULE(_core, m) {
             cfg->downscale_factor = downscale_factor;
             cfg->output = output;
             cfg->save_every = save_every;
-            if (bg_color.size() == 3) cfg->bg_color = bg_color;
+            if (bg_color.size() != 3)
+                throw std::invalid_argument("bg_color must have exactly 3 elements [R, G, B]");
+            cfg->bg_color = bg_color;
         },
             "iterations"_a = 30000,
             "sh_degree"_a = 3,
