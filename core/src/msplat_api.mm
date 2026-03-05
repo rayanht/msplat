@@ -48,6 +48,10 @@ Dataset& Dataset::operator=(Dataset&&) noexcept = default;
 
 int Dataset::numTrain() const { return (int)impl->trainCams.size(); }
 int Dataset::numTest() const { return (int)impl->testCams.size(); }
+void Dataset::cameraPose(int index, float camToWorld[16]) const {
+    if (index >= 0 && index < (int)impl->trainCams.size())
+        memcpy(camToWorld, impl->trainCams[index].camToWorld, 16 * sizeof(float));
+}
 void* Dataset::_handle() const { return impl.get(); }
 
 // ── Trainer::Impl ───────────────────────────────────────────────────────────
@@ -180,6 +184,59 @@ PixelBuffer Trainer::render(int cameraIndex, bool useTest) {
     return PixelBuffer(buf, w, h);
 }
 
+PixelBuffer Trainer::renderFromPose(const float camToWorld[16], int refCameraIndex) {
+    auto& cams = impl->ds->trainCams;
+    if (refCameraIndex < 0 || refCameraIndex >= (int)cams.size())
+        return {};
+
+    Camera cam = cams[refCameraIndex];  // copy intrinsics
+    memcpy(cam.camToWorld, camToWorld, 16 * sizeof(float));
+    // Invalidate cached matrices so prepareCam recomputes from the new pose
+    cam.cachedViewMat = MTensor();
+    cam.cachedProjViewMat = MTensor();
+
+    MTensor rgb = impl->model->render(cam, impl->currentStep);
+    msplat_gpu_sync();
+    MTensor rgbCpu = rgb.cpu();
+
+    int h = (int)rgbCpu.size(0);
+    int w = (int)rgbCpu.size(1);
+    float* buf = new float[h * w * 3];
+    memcpy(buf, rgbCpu.data_ptr(), h * w * 3 * sizeof(float));
+    return PixelBuffer(buf, w, h);
+}
+
+void Trainer::renderFromPoseToBuffer(const float camToWorld[16], int refCameraIndex,
+                                  uint8_t* outRGBA, int* outWidth, int* outHeight) {
+    auto& cams = impl->ds->trainCams;
+    if (refCameraIndex < 0 || refCameraIndex >= (int)cams.size()) {
+        *outWidth = 0; *outHeight = 0; return;
+    }
+
+    Camera cam = cams[refCameraIndex];
+    memcpy(cam.camToWorld, camToWorld, 16 * sizeof(float));
+    cam.cachedViewMat = MTensor();
+    cam.cachedProjViewMat = MTensor();
+
+    MTensor rgb = impl->model->render(cam, impl->currentStep);
+    msplat_gpu_sync();
+
+    int h = (int)rgb.size(0), w = (int)rgb.size(1);
+    *outWidth = w;
+    *outHeight = h;
+    if (!outRGBA) return;
+
+    // Read directly from GPU tensor (unified memory on Apple Silicon)
+    const float* src = (const float*)rgb.data_ptr();
+    int n = w * h;
+    for (int i = 0; i < n; i++) {
+        outRGBA[i * 4]     = (uint8_t)(fminf(fmaxf(src[i*3],   0.f), 1.f) * 255.f);
+        outRGBA[i * 4 + 1] = (uint8_t)(fminf(fmaxf(src[i*3+1], 0.f), 1.f) * 255.f);
+        outRGBA[i * 4 + 2] = (uint8_t)(fminf(fmaxf(src[i*3+2], 0.f), 1.f) * 255.f);
+        outRGBA[i * 4 + 3] = 255;
+    }
+}
+
 void Trainer::exportPly(const std::string& path) {
     impl->model->savePly(path, impl->currentStep);
 }
@@ -257,6 +314,10 @@ int msplat_dataset_num_test(MsplatDataset ds) {
     return static_cast<msplat::Dataset*>(ds)->numTest();
 }
 
+void msplat_dataset_camera_pose(MsplatDataset ds, int cameraIndex, float camToWorld[16]) {
+    static_cast<msplat::Dataset*>(ds)->cameraPose(cameraIndex, camToWorld);
+}
+
 MsplatTrainer msplat_trainer_create(MsplatDataset ds, MsplatConfig config) {
     auto* dataset = static_cast<msplat::Dataset*>(ds);
     auto cfg = configFromC(config);
@@ -287,6 +348,20 @@ MsplatPixelBuffer msplat_trainer_render(MsplatTrainer t, int cameraIndex, bool u
     MsplatPixelBuffer result{buf.data, buf.width, buf.height};
     buf.data = nullptr; // Transfer ownership to caller
     return result;
+}
+
+MsplatPixelBuffer msplat_trainer_render_pose(MsplatTrainer t, const float camToWorld[16], int refCameraIndex) {
+    auto buf = static_cast<msplat::Trainer*>(t)->renderFromPose(camToWorld, refCameraIndex);
+    MsplatPixelBuffer result{buf.data, buf.width, buf.height};
+    buf.data = nullptr;
+    return result;
+}
+
+void msplat_trainer_render_pose_to_buffer(MsplatTrainer t, const float camToWorld[16],
+                                      int refCameraIndex, uint8_t* outRGBA,
+                                      int* outWidth, int* outHeight) {
+    static_cast<msplat::Trainer*>(t)->renderFromPoseToBuffer(
+        camToWorld, refCameraIndex, outRGBA, outWidth, outHeight);
 }
 
 void msplat_trainer_export_ply(MsplatTrainer t, const char* path) {

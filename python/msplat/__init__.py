@@ -34,7 +34,7 @@ __all__ = [
     "load_dataset",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 
 def load_dataset(

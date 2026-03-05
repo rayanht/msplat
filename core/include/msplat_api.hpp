@@ -89,6 +89,7 @@ public:
 
     int numTrain() const;
     int numTest() const;
+    void cameraPose(int index, float camToWorld[16]) const;
 
     // Opaque handle for Trainer
     void* _handle() const;
@@ -121,6 +122,16 @@ public:
 
     /// Render a camera view. Caller owns the returned PixelBuffer.
     PixelBuffer render(int cameraIndex, bool useTest);
+
+    /// Render from an arbitrary camera-to-world pose (4x4 row-major, OpenGL convention).
+    /// Uses intrinsics from the given reference camera.
+    PixelBuffer renderFromPose(const float camToWorld[16], int refCameraIndex);
+
+    /// Render from pose directly into a caller-provided RGBA uint8 buffer.
+    /// outRGBA must hold width*height*4 bytes. Avoids intermediate float allocation.
+    /// Call with outRGBA=nullptr to query dimensions only.
+    void renderFromPoseToBuffer(const float camToWorld[16], int refCameraIndex,
+                            uint8_t* outRGBA, int* outWidth, int* outHeight);
 
     /// Export scene to PLY format.
     void exportPly(const std::string& path);

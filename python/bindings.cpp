@@ -83,6 +83,17 @@ public:
 
     size_t num_train() const { return train_cams.size(); }
     size_t num_test() const { return test_cams.size(); }
+
+    // Get camera-to-world pose (4x4 row-major) as numpy array
+    nb::object camera_pose(int index) {
+        if (index < 0 || index >= (int)train_cams.size())
+            throw std::runtime_error("Camera index out of range");
+        float *buf = new float[16];
+        memcpy(buf, train_cams[index].camToWorld, 16 * sizeof(float));
+        nb::capsule deleter(buf, [](void *p) noexcept { delete[] static_cast<float*>(p); });
+        size_t shape[2] = {4, 4};
+        return nb::cast(nb::ndarray<nb::numpy, float>(buf, 2, shape, deleter));
+    }
 };
 
 // ── GaussianTrainer ─────────────────────────────────────────────────────────
@@ -221,6 +232,32 @@ public:
         return nb::cast(nb::ndarray<nb::numpy, float>(buf, 3, shape, deleter));
     }
 
+    // Render from arbitrary pose → numpy (H, W, 3) float32
+    nb::object render_from_pose(nb::ndarray<nb::numpy, float> cam_to_world, int ref_cam_idx) {
+        if (cam_to_world.size() != 16)
+            throw std::runtime_error("cam_to_world must have 16 elements (4x4 matrix)");
+        if (ref_cam_idx < 0 || ref_cam_idx >= (int)dataset_ptr->train_cams.size())
+            throw std::runtime_error("ref_cam_idx out of range");
+
+        Camera cam = dataset_ptr->train_cams[ref_cam_idx];
+        memcpy(cam.camToWorld, cam_to_world.data(), 16 * sizeof(float));
+        cam.cachedViewMat = MTensor();
+        cam.cachedProjViewMat = MTensor();
+
+        MTensor rgb = model->render(cam, current_step);
+        msplat_gpu_sync();
+        MTensor rgb_cpu = rgb.cpu();
+
+        int h = rgb_cpu.size(0);
+        int w = rgb_cpu.size(1);
+        float *buf = new float[h * w * 3];
+        memcpy(buf, rgb_cpu.data_ptr(), h * w * 3 * sizeof(float));
+
+        nb::capsule deleter(buf, [](void *p) noexcept { delete[] static_cast<float*>(p); });
+        size_t shape[3] = {(size_t)h, (size_t)w, 3};
+        return nb::cast(nb::ndarray<nb::numpy, float>(buf, 3, shape, deleter));
+    }
+
     void export_ply(const std::string &path) {
         model->savePly(path, current_step);
     }
@@ -336,7 +373,9 @@ NB_MODULE(_core, m) {
             "path"_a, "downscale_factor"_a = 1.0f,
             "eval_mode"_a = false, "test_every"_a = 8)
         .def_prop_ro("num_train", &Dataset::num_train, "Number of training cameras.")
-        .def_prop_ro("num_test", &Dataset::num_test, "Number of test cameras (0 unless eval_mode=True).");
+        .def_prop_ro("num_test", &Dataset::num_test, "Number of test cameras (0 unless eval_mode=True).")
+        .def("camera_pose", &Dataset::camera_pose, "index"_a,
+            "Get camera-to-world pose (4x4 row-major, OpenGL convention) as numpy array.");
 
     // GaussianTrainer
     nb::class_<GaussianTrainer>(m, "GaussianTrainer",
@@ -354,6 +393,10 @@ NB_MODULE(_core, m) {
         .def("render", &GaussianTrainer::render,
             "cam_idx"_a, "use_test"_a = false,
             "Render a camera view. Returns a numpy array of shape (H, W, 3), float32, RGB [0,1].")
+        .def("render_from_pose", &GaussianTrainer::render_from_pose,
+            "cam_to_world"_a, "ref_cam_idx"_a = 0,
+            "Render from an arbitrary camera-to-world pose (4x4 row-major, OpenGL convention).\n"
+            "Uses intrinsics from ref_cam_idx. Returns numpy (H, W, 3) float32.")
         .def("export_ply", &GaussianTrainer::export_ply, "path"_a,
             "Export the current Gaussians as a PLY file.")
         .def("export_splat", &GaussianTrainer::export_splat, "path"_a,

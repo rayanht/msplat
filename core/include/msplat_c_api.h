@@ -5,6 +5,7 @@
 #define MSPLAT_C_API_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -97,12 +98,21 @@ MsplatStats msplat_trainer_step(MsplatTrainer t);
 void msplat_trainer_train(MsplatTrainer t);
 MsplatEvalMetrics msplat_trainer_evaluate(MsplatTrainer t);
 MsplatPixelBuffer msplat_trainer_render(MsplatTrainer t, int cameraIndex, bool useTest);
+MsplatPixelBuffer msplat_trainer_render_pose(MsplatTrainer t, const float camToWorld[16], int refCameraIndex);
+
+/// Render into a caller-provided RGBA uint8 buffer (no allocation, no float copy).
+/// outRGBA must be at least width*height*4 bytes. Returns dimensions via outWidth/outHeight.
+/// Call once with outRGBA=NULL to get dimensions, then allocate and call again.
+void msplat_trainer_render_pose_to_buffer(MsplatTrainer t, const float camToWorld[16],
+                                      int refCameraIndex, uint8_t* outRGBA,
+                                      int* outWidth, int* outHeight);
 void msplat_trainer_export_ply(MsplatTrainer t, const char* path);
 void msplat_trainer_export_splat(MsplatTrainer t, const char* path);
 void msplat_trainer_save_checkpoint(MsplatTrainer t, const char* path);
 int msplat_trainer_load_checkpoint(MsplatTrainer t, const char* path);
 int msplat_trainer_splat_count(MsplatTrainer t);
 int msplat_trainer_iteration(MsplatTrainer t);
+void msplat_dataset_camera_pose(MsplatDataset ds, int cameraIndex, float camToWorld[16]);
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 

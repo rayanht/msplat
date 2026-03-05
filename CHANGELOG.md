@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.1 — Arbitrary viewpoint rendering
+
+- **`renderFromPose` API** — render from any camera-to-world matrix, not just dataset cameras.
+  Uses intrinsics from a reference camera. Available across all surfaces:
+  - C++: `trainer.renderFromPose(camToWorld, refCameraIndex)`
+  - C API: `msplat_trainer_render_pose()`
+  - Python: `trainer.render_from_pose(cam_to_world, ref_cam_idx=0)`
+  - Swift: `trainer.renderFromPose(camToWorld:refCameraIndex:)`
+- **`renderFromPoseToBuffer`** — zero-copy variant that writes directly into a
+  caller-provided RGBA uint8 buffer. Eliminates intermediate float allocation for
+  real-time display loops (400 FPS at full resolution on M4 Max).
+  - C++: `trainer.renderFromPoseToBuffer(camToWorld, ref, outRGBA, &w, &h)`
+  - C API: `msplat_trainer_render_pose_to_buffer()`
+- **`cameraPose` accessor** — retrieve camera-to-world matrices from loaded datasets.
+  - C++: `dataset.cameraPose(index, outMatrix)`
+  - C API: `msplat_dataset_camera_pose()`
+  - Python: `dataset.camera_pose(index)` → numpy `(4, 4)` float32
+  - Swift: `dataset.cameraPose(at: index)` → `[Float]`
+- **Demo app** (`demo/`) — macOS SwiftUI app for screen-recording hero videos.
+  Live training with progress bar, then smooth circular camera orbit with FPS counter.
+
 ## v1.0 — Public release
 
 Stable API across Python, Swift, and C++ surfaces.

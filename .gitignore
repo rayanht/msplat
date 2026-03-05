@@ -42,3 +42,6 @@ datasets/mipnerf360/*/
 cameras.json
 /output/
 *.ply
+
+# Demo
+demo/.build/

@@ -2,7 +2,11 @@
 
 A 3D Gaussian Splatting training engine for Apple Silicon, built entirely on Metal compute shaders. No external dependencies beyond system frameworks.
 
-44 fused Metal compute kernels implement the full training pipeline: projection, tile-based rasterization, separable SSIM loss, backward pass, Adam optimizer, and GPU-resident densification. The result is a self-contained engine that trains a Mip-NeRF 360 scene in ~90 seconds on an M4 Max.
+44 fused Metal compute kernels implement the full training pipeline: projection, tile-based rasterization, separable SSIM loss, backward pass, Adam optimizer, and GPU-resident densification. 
+
+The result is a self-contained engine that trains a full-resolution Mip-NeRF 360 scene in ~90 seconds and renders it at ~350 FPS on an M4 Max.
+
+<video src="https://github.com/rayanht/metal-splat/releases/download/v0.0/demo.mp4" autoplay loop muted playsinline width="100%"></video>
 
 ```
 pip install msplat
@@ -73,6 +77,10 @@ trainer.export_ply("output.ply")
 trainer.save_checkpoint("checkpoint.msplat")  # save/resume training
 metrics = trainer.evaluate()
 print(f"PSNR: {metrics['psnr']:.2f}  SSIM: {metrics['ssim']:.3f}")
+
+# Render from arbitrary viewpoints
+pose = dataset.camera_pose(0)   # (4, 4) cam-to-world matrix
+img = trainer.render_from_pose(pose)  # numpy (H, W, 3) float32
 ```
 
 Supported dataset formats: COLMAP, Nerfstudio, Polycam.
@@ -93,7 +101,7 @@ Requires Xcode and CMake (`brew install cmake`).
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/rayanht/metal-splat.git", from: "1.0.0")
+    .package(url: "https://github.com/rayanht/metal-splat.git", from: "1.1.0")
 ]
 ```
 
@@ -115,6 +123,10 @@ for _ in 0..<1000 {
 }
 
 trainer.exportPly(to: "output.ply")
+
+// Render from arbitrary viewpoints
+let pose = dataset.cameraPose(at: 0)  // [Float] cam-to-world matrix
+let img = trainer.renderFromPose(camToWorld: pose)
 ```
 
 ### C++ CLI

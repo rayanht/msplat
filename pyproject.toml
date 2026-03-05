@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "msplat"
-version = "1.0.0"
+version = "1.1.0"
 description = "Metal-accelerated 3D Gaussian Splatting for Apple Silicon"
 readme = "README.md"
 license = "Apache-2.0"

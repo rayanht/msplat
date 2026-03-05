@@ -44,6 +44,19 @@ public class GaussianTrainer {
         return PixelData(pixels: data, width: Int(buf.width), height: Int(buf.height))
     }
 
+    /// Render from an arbitrary camera-to-world pose (4x4 row-major, OpenGL convention).
+    /// Uses intrinsics (focal length, resolution) from the given reference camera.
+    public func renderFromPose(camToWorld: [Float], refCameraIndex: Int = 0) -> PixelData {
+        precondition(camToWorld.count == 16)
+        let buf = camToWorld.withUnsafeBufferPointer { ptr in
+            msplat_trainer_render_pose(handle, ptr.baseAddress!, Int32(refCameraIndex))
+        }
+        let count = Int(buf.width) * Int(buf.height) * 3
+        let data = Array(UnsafeBufferPointer(start: buf.data, count: count))
+        free(buf.data)
+        return PixelData(pixels: data, width: Int(buf.width), height: Int(buf.height))
+    }
+
     /// Export scene as PLY.
     public func exportPly(to path: String) {
         msplat_trainer_export_ply(handle, path)

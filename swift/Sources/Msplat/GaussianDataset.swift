@@ -36,4 +36,13 @@ public class GaussianDataset {
 
     /// Number of test cameras (0 if evalMode was false).
     public var numTest: Int { Int(msplat_dataset_num_test(handle)) }
+
+    /// Get the camera-to-world pose (4x4 row-major, OpenGL convention) for a training camera.
+    public func cameraPose(at index: Int) -> [Float] {
+        var pose = [Float](repeating: 0, count: 16)
+        pose.withUnsafeMutableBufferPointer { ptr in
+            msplat_dataset_camera_pose(handle, Int32(index), ptr.baseAddress!)
+        }
+        return pose
+    }
 }
