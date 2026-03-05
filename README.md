@@ -1,18 +1,16 @@
 # msplat
 
-A 3D Gaussian Splatting training engine for Apple Silicon, built entirely on Metal compute shaders. No external dependencies beyond system frameworks.
+A 3D Gaussian Splatting training engine for Apple Silicon, built entirely on Metal. No external dependencies beyond system frameworks.
 
-44 fused Metal compute kernels implement the full training pipeline: projection, tile-based rasterization, separable SSIM loss, backward pass, Adam optimizer, and GPU-resident densification. 
+The entire training pipeline: projection, sorting, rasterization, SSIM loss, backward pass, Adam optimizer, and densification runs as fused Metal compute shaders.
 
 The result is a self-contained engine that trains a full-resolution Mip-NeRF 360 scene in ~90 seconds and renders it at ~350 FPS on an M4 Max.
+
+Python and Swift bindings are provided, as well as a standalone C++ CLI.
 
 <div align="center">
   <video src="https://github.com/user-attachments/assets/cb942a38-cf6a-4b06-9899-675396550c57" />
 </div>
-
-```
-pip install msplat
-```
 
 ## Why this exists
 
@@ -61,9 +59,13 @@ Backward:
 
 **Depth-chunked rasterization.** For tiles with extreme gaussian counts, the forward pass splits into 512-gaussian chunks with a merge kernel that reconstructs absolute transmittance. The backward pass uses precomputed prefix/suffix transmittance to avoid re-traversal.
 
-## Usage
+## Installation & Usage
 
 ### Python
+
+```bash
+pip install msplat
+```
 
 ```python
 import msplat
