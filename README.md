@@ -6,7 +6,9 @@ A 3D Gaussian Splatting training engine for Apple Silicon, built entirely on Met
 
 The result is a self-contained engine that trains a full-resolution Mip-NeRF 360 scene in ~90 seconds and renders it at ~350 FPS on an M4 Max.
 
-<video src="https://github.com/rayanht/metal-splat/releases/download/v0.0/demo.mp4" autoplay loop muted playsinline width="100%"></video>
+<div align="center">
+  <video src="https://github.com/rayanht/metal-splat/releases/download/v0.0/demo.mp4" width="100%" />
+</div>
 
 ```
 pip install msplat
