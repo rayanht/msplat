@@ -45,3 +45,7 @@ cameras.json
 
 # Demo
 demo/.build/
+
+# Node
+node_modules/
+.msplat-web/

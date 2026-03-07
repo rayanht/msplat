@@ -297,7 +297,7 @@ void Model::afterTrain(int step){
 
 void Model::save(const std::string &filename, int step) {
     std::string ext = fs::path(filename).extension().string();
-    if (ext == ".splat")
+    if (ext == ".splat" || ext == ".spl")
         saveSplat(filename);
     else
         savePly(filename, step);

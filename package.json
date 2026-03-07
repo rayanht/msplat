@@ -1,0 +1,11 @@
+{
+  "name": "msplat-internal-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "web": "node web/server.mjs",
+    "worker": "node web/worker.mjs",
+    "dev": "node web/dev.mjs",
+    "test": "node --test tests/web/*.test.mjs"
+  }
+}
