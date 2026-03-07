@@ -159,6 +159,182 @@ cd swift && swift build
 
 Requires macOS 14+, Apple Silicon. No external dependencies.
 
+## Run Modes
+
+This repo now has two distinct ways to use `msplat` locally:
+
+1. `CLI`: run `msplat` directly against a prepared dataset that already matches the native loader formats.
+2. `Web GUI`: upload prepared datasets, COLMAP TXT exports, raw-image zips, or raw photos and let the worker run the full COLMAP-to-training pipeline.
+
+### CLI Workflow
+
+Use this path when you already have a dataset that `msplat` can read directly.
+
+What the CLI expects:
+
+- COLMAP with a binary sparse model such as `sparse/0/cameras.bin`, `sparse/0/images.bin`, and `sparse/0/points3D.bin`
+- Nerfstudio with `transforms.json` and a seed point cloud
+- Polycam with the supported camera/image layout and a seed point cloud
+
+The CLI does **not** build COLMAP from raw photos for you. If you only have images, use the web GUI workflow below.
+
+Build and run:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./build/msplat path/to/dataset -n 7000 --val
+```
+
+Common examples:
+
+```bash
+# Preview
+./build/msplat path/to/dataset -n 1500 -d 2 --num-downscales 2 --val
+
+# Standard
+./build/msplat path/to/dataset -n 7000 -d 1 --num-downscales 0 --val
+
+# High
+./build/msplat path/to/dataset -n 30000 -d 1 --num-downscales 0 --val
+```
+
+Add output flags as needed:
+
+```bash
+./build/msplat path/to/dataset -o output/final.spl --val --val-render output/previews
+```
+
+### Web GUI Workflow
+
+Use this path when you want the full internal pipeline:
+
+- upload a prepared dataset zip and train
+- upload a COLMAP TXT export and convert it automatically
+- upload a raw-image zip and reconstruct COLMAP first
+- upload raw photo files directly and reconstruct COLMAP first
+
+Requirements:
+
+- built `msplat` CLI binary
+- `colmap` installed and available on `PATH`, or passed explicitly through `COLMAP_BIN`
+- Node.js with `npm`
+
+Start the GUI and worker:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+MSPLAT_BIN=./build/msplat npm run web
+MSPLAT_BIN=./build/msplat COLMAP_BIN=colmap npm run worker
+```
+
+Or run both together:
+
+```bash
+MSPLAT_BIN=./build/msplat COLMAP_BIN=colmap npm run dev
+```
+
+Then open:
+
+```text
+http://127.0.0.1:4321
+```
+
+The GUI exposes two upload flows:
+
+- `Prepared Dataset / Zip`: prepared COLMAP BIN, COLMAP TXT, Nerfstudio, Polycam, or raw-image zip
+- `Raw Photos`: direct multi-image upload with `Sequential` or `Exhaustive` COLMAP matching
+
+What the worker does:
+
+1. Validates the upload and rejects unsafe archives.
+2. Converts COLMAP TXT to BIN when needed.
+3. Runs COLMAP feature extraction, matching, mapper, and best-model selection for raw photos.
+4. Queues the normalized dataset for `msplat` training.
+5. Stores `final.spl`, `final.ply`, `cameras.json`, previews, logs, and generated COLMAP artifacts for download.
+
+Useful environment variables:
+
+- `MSPLAT_BIN`: path to the `msplat` CLI binary
+- `COLMAP_BIN`: path to the `colmap` binary, default `colmap`
+- `COLMAP_FLAG_STYLE`: COLMAP option family for CPU-only reconstruction, `modern` by default, or `legacy` for older COLMAP builds
+- `MSPLAT_JOBS_DIR`: job storage root
+- `DATABASE_URL`: SQLite file path
+- `MAX_UPLOAD_GB`: upload limit, default `10`
+
+Browser/API entry points:
+
+- `POST /api/jobs`: prepared dataset zips, COLMAP TXT zips, and raw-image zips
+- `POST /api/jobs/raw`: direct `multipart/form-data` raw photo uploads
+
+Raw-photo jobs require at least 3 images. In practice, use at least 8 overlapping images whenever possible.
+
+For very small raw-photo batches, the worker lowers COLMAP's mapper thresholds and will retry with exhaustive matching if sequential initialization cannot find a starting pair.
+
+If raw-photo jobs fail with a COLMAP option parse error on an older install, restart the worker with:
+
+```bash
+COLMAP_FLAG_STYLE=legacy MSPLAT_BIN=./build/msplat COLMAP_BIN=colmap npm run worker
+```
+
+## Internal Website
+
+This repo also includes a small internal training site for queued `msplat` runs.
+
+Features:
+
+- Upload a prepared dataset zip (COLMAP BIN, COLMAP TXT, Nerfstudio, or Polycam)
+- Upload a raw-image zip or raw photo files directly and reconstruct COLMAP first
+- Queue a single-worker training job on Apple Silicon
+- Watch status, phase, log tail, validation thumbnails, and final metrics
+- Download `final.spl`, `final.ply`, `cameras.json`, previews, the run log, and generated COLMAP artifacts
+
+The website uses the existing CLI as its worker backend and stores job state in SQLite.
+
+### Run it
+
+Build the CLI first:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+Then start the app and worker in separate terminals:
+
+```bash
+MSPLAT_BIN=./build/msplat npm run web
+MSPLAT_BIN=./build/msplat COLMAP_BIN=colmap npm run worker
+```
+
+Or run both together during development:
+
+```bash
+MSPLAT_BIN=./build/msplat COLMAP_BIN=colmap npm run dev
+```
+
+Homebrew COLMAP 3.13 works with the default `COLMAP_FLAG_STYLE=modern`. Use `COLMAP_FLAG_STYLE=legacy` only if your COLMAP build still expects `SiftExtraction.use_gpu` and `SiftMatching.use_gpu`.
+
+Default web URL: `http://127.0.0.1:4321`
+
+This section is the same web GUI workflow described above, kept here for feature-level reference.
+
+### Website tests
+
+```bash
+npm test
+```
+
+There is also an opt-in smoke test that can run a real Apple Silicon training job:
+
+```bash
+MSPLAT_SMOKE_BIN=./build/msplat \
+MSPLAT_SMOKE_COLMAP_BIN=colmap \
+MSPLAT_SMOKE_DATASET=/absolute/path/to/dataset.zip \
+npm test
+```
+
 ## Benchmarks
 
 mipnerf360, M4 Max. msplat runs 7K iterations with no downscales:

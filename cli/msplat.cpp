@@ -3,10 +3,13 @@
 #include <algorithm>
 #include <numeric>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <CLI/CLI.hpp>
 #include "model.hpp"
 #include "input_data.hpp"
+#include "msplat_c_api.h"
 #include "random_iter.hpp"
 #include "loaders.hpp"
 #include "msplat.hpp"
@@ -26,6 +29,8 @@ int main(int argc, char *argv[]) {
     // Output
     std::string outputScene = "splat.ply";
     app.add_option("-o,--output", outputScene, "Output scene path");
+    std::string exportPly;
+    app.add_option("--export-ply", exportPly, "Additional PLY export path");
     int saveEvery = -1;
     app.add_option("-s,--save-every", saveEvery, "Save every N steps (-1 to disable)");
 
@@ -97,10 +102,60 @@ int main(int argc, char *argv[]) {
     downScaleFactor = std::max(downScaleFactor, 1.0f);
 
     try {
+        fs::path executablePath = fs::absolute(argv[0]);
+        fs::path metallibPath = executablePath.parent_path() / "default.metallib";
+        if (fs::exists(metallibPath)) {
+            msplat_set_metallib_path(metallibPath.string().c_str());
+            std::cout << "[runtime] metallib=" << metallibPath << std::endl;
+        } else {
+            std::cout << "[runtime] warning: default.metallib not found next to executable: "
+                      << metallibPath << std::endl;
+        }
+
         InputData inputData = inputDataFromX(projectRoot, colmapImagePath);
 
-        for (auto &cam : inputData.cameras)
+        auto formatGiB = [](double bytes) {
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(2) << (bytes / (1024.0 * 1024.0 * 1024.0));
+            return ss.str();
+        };
+
+        double estimatedImageBytes = 0.0;
+        for (const auto &cam : inputData.cameras) {
+            double width = std::max(1.0, std::floor(static_cast<double>(cam.width) / static_cast<double>(downScaleFactor)));
+            double height = std::max(1.0, std::floor(static_cast<double>(cam.height) / static_cast<double>(downScaleFactor)));
+            estimatedImageBytes += width * height * 3.0 * sizeof(float);
+        }
+
+        std::cout << "[dataset] path=" << projectRoot
+                  << " cameras=" << inputData.cameras.size()
+                  << " seed_points=" << inputData.points.count
+                  << " downscale=" << downScaleFactor
+                  << " est_cpu_image_mem=" << formatGiB(estimatedImageBytes) << " GiB"
+                  << std::endl;
+
+        if (estimatedImageBytes > 4.0 * 1024.0 * 1024.0 * 1024.0) {
+            std::cout << "[dataset] warning: high image memory estimate; consider Preview preset or -d 2 for faster startup"
+                      << std::endl;
+        }
+
+        double loadedImageBytes = 0.0;
+        const size_t loadLogEvery = std::max<size_t>(1, inputData.cameras.size() / 8);
+        std::cout << "[dataset] loading images..." << std::endl;
+
+        for (size_t index = 0; index < inputData.cameras.size(); index++) {
+            auto &cam = inputData.cameras[index];
             cam.loadImage(downScaleFactor);
+            loadedImageBytes += (double)cam.width * (double)cam.height * 3.0 * sizeof(float);
+
+            if (index == 0 || (index + 1) % loadLogEvery == 0 || index + 1 == inputData.cameras.size()) {
+                std::cout << "[dataset] loaded " << (index + 1) << "/" << inputData.cameras.size()
+                          << " latest=" << fs::path(cam.filePath).filename().string()
+                          << " size=" << cam.width << "x" << cam.height
+                          << " approx_cpu_image_mem=" << formatGiB(loadedImageBytes) << " GiB"
+                          << std::endl;
+            }
+        }
 
         std::vector<Camera> cams;
         std::vector<Camera> testCams;
@@ -115,12 +170,24 @@ int main(int argc, char *argv[]) {
             cams = train; valCam = val;
         }
 
+        std::cout << "[train] train_cameras=" << cams.size()
+                  << " val_camera=" << (valCam ? fs::path(valCam->filePath).filename().string() : "none")
+                  << " eval_cameras=" << testCams.size()
+                  << std::endl;
+
         Model model(inputData, cams.size(),
                      numDownscales, resolutionSchedule, shDegree, shDegreeInterval,
                      refineEvery, warmupLength, resetAlphaEvery, densifyGradThresh,
                      densifySizeThresh, stopScreenSizeAt, splitScreenSize,
                      numIters, keepCrs,
                      bgColor.data());
+
+        std::cout << "[train] starting iterations=" << numIters
+                  << " preset_downscale=" << downScaleFactor
+                  << " progressive_downscales=" << numDownscales
+                  << " resolution_schedule=" << resolutionSchedule
+                  << " output=" << outputScene
+                  << std::endl;
 
         std::vector<size_t> camIndices(cams.size());
         std::iota(camIndices.begin(), camIndices.end(), 0);
@@ -150,6 +217,15 @@ int main(int argc, char *argv[]) {
             model.afterTrain(step);
             msplat_commit();
 
+            if (step <= 10 || step % 50 == 0 || step == (size_t)numIters) {
+                std::cout << "[train] step=" << step
+                          << "/" << numIters
+                          << " ds=" << model.getDownscaleFactor((int)step)
+                          << " gaussians=" << model.means.size(0)
+                          << " camera=" << fs::path(cam.filePath).filename().string()
+                          << std::endl;
+            }
+
             if (benchmarking && step > (size_t)bench_warmup) {
                 auto pre_sync = cpu_now();
                 msplat_gpu_sync();
@@ -176,7 +252,11 @@ int main(int argc, char *argv[]) {
                 valImg.height = (int)rgb_cpu.size(0);
                 valImg.data.resize(valImg.width * valImg.height * 3);
                 memcpy(valImg.ptr(), rgb_cpu.data_ptr(), valImg.data.size() * sizeof(float));
-                imwriteRGB((fs::path(valRender) / (std::to_string(step) + ".png")).string(), valImg);
+                std::string previewPath = (fs::path(valRender) / (std::to_string(step) + ".png")).string();
+                imwriteRGB(previewPath, valImg);
+                std::cout << "[train] wrote_preview step=" << step
+                          << " path=" << previewPath
+                          << std::endl;
             }
         }
 
@@ -221,6 +301,11 @@ int main(int argc, char *argv[]) {
 
         inputData.saveCameras((fs::path(outputScene).parent_path() / "cameras.json").string(), keepCrs);
         model.save(outputScene, numIters);
+        if (!exportPly.empty() && fs::path(exportPly) != fs::path(outputScene)) {
+            model.savePly(exportPly, numIters);
+            std::cout << "[train] saved_output path=" << exportPly << std::endl;
+        }
+        std::cout << "[train] saved_output path=" << outputScene << std::endl;
 
         // Evaluation
         if (evalMode && !testCams.empty()) {

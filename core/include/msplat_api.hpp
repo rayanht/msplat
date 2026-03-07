@@ -136,7 +136,7 @@ public:
     /// Export scene to PLY format.
     void exportPly(const std::string& path);
 
-    /// Export scene to .splat format.
+    /// Export scene to .splat/.spl format.
     void exportSplat(const std::string& path);
 
     /// Save full training state (params + optimizer) for resume.

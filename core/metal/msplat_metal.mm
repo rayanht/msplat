@@ -97,9 +97,14 @@ MetalContext* init_msplat_metal_context() {
     NSError *error = nil;
     id<MTLLibrary> metal_library = nil;
 
+    const char* env_metallib_path = getenv("MSPLAT_METALLIB_PATH");
+
     if (g_metallib_path) {
         // Explicit path (set by XCFramework / Swift wrapper)
         NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:g_metallib_path]];
+        metal_library = [device newLibraryWithURL:url error:&error];
+    } else if (env_metallib_path && env_metallib_path[0] != '\0') {
+        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:env_metallib_path]];
         metal_library = [device newLibraryWithURL:url error:&error];
     } else {
         // Auto-discover default.metallib next to this library or the executable
