@@ -1786,6 +1786,30 @@ kernel void project_and_sh_forward_kernel(
     sh_coeffs_to_color(degrees_to_use, viewdir, &(features_dc[dc_idx]), &(features_rest[rest_idx]), &(colors[idx_col]));
 }
 
+// Adam update helper — applies one Adam step to a single element.
+// Computes in registers, writes param/exp_avg/exp_avg_sq back to device memory.
+inline void adam_update_element(
+    device float& param, device float& ea, device float& eas,
+    float grad, float step_size, float beta1, float beta2, float bc2_sqrt, float eps
+) {
+    float m = fma(beta1, ea, (1.0f - beta1) * grad);
+    float v = fma(beta2, eas, (1.0f - beta2) * grad * grad);
+    param -= step_size * m / (sqrt(v) / bc2_sqrt + eps);
+    ea = m;
+    eas = v;
+}
+
+// Packed Adam hyperparameters for SH groups (passed via setBytes)
+struct SHAdamParams {
+    float dc_step_size;
+    float dc_bc2_sqrt;
+    float rest_step_size;
+    float rest_bc2_sqrt;
+    float beta1;
+    float beta2;
+    float eps;
+};
+
 kernel void project_and_sh_backward_kernel(
     // Projection backward args
     constant int& num_points,
@@ -1805,13 +1829,18 @@ kernel void project_and_sh_backward_kernel(
     device float* v_mean3d,
     device float* v_scale,
     device float* v_quat,
-    // SH backward args
+    // SH backward + fused Adam args
     constant uint& degree,
     constant uint& degrees_to_use,
     constant float3& cam_pos,
     constant float* v_colors,
-    device float* v_features_dc,
-    device float* v_features_rest,
+    device float* features_dc,         // params (read-write for Adam)
+    device float* features_rest,       // params (read-write for Adam)
+    device float* dc_exp_avg,          // Adam state
+    device float* dc_exp_avg_sq,
+    device float* rest_exp_avg,
+    device float* rest_exp_avg_sq,
+    constant SHAdamParams& adam_hp,
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= (uint)num_points || radii[idx] <= 0) {
@@ -1880,14 +1909,80 @@ kernel void project_and_sh_backward_kernel(
     v_scale[3*idx + 1] *= exp_scale.y;
     v_scale[3*idx + 2] *= exp_scale.z;
 
-    // SH backward: reuse p_world (does NOT contribute to v_mean3d)
+    // ---- Fused SH backward + Adam ----
+    // Compute SH gradients in registers and apply Adam inline.
+    // Eliminates v_features_dc/v_features_rest write+read round-trip (~600 MB/iter at 1.6M gaussians).
     float3 viewdir = normalize(p_world - cam_pos);
     const uint num_channels = 3;
     uint num_bases = num_sh_bases(degree);
     uint dc_idx = num_channels * idx;
     uint rest_idx = (num_bases - 1) * num_channels * idx;
     uint idx_col = num_channels * idx;
-    sh_coeffs_to_color_vjp(degrees_to_use, viewdir, &(v_colors[idx_col]), &(v_features_dc[dc_idx]), &(v_features_rest[rest_idx]));
+
+    float vc[3] = { v_colors[idx_col], v_colors[idx_col + 1], v_colors[idx_col + 2] };
+
+    // DC: grad = SH_C0 * v_colors[c]
+    for (int c = 0; c < 3; c++) {
+        float g = SH_C0 * vc[c];
+        adam_update_element(features_dc[dc_idx + c], dc_exp_avg[dc_idx + c], dc_exp_avg_sq[dc_idx + c],
+                           g, adam_hp.dc_step_size, adam_hp.beta1, adam_hp.beta2, adam_hp.dc_bc2_sqrt, adam_hp.eps);
+    }
+
+    if (degrees_to_use < 1) return;
+
+    float x = viewdir.x, y = viewdir.y, z = viewdir.z;
+    float xx = x*x, xy = x*y, xz = x*z, yy = y*y, yz = y*z, zz = z*z;
+
+    // SH degree 1 (3 bases)
+    float sh1[3] = { -SH_C1 * y, SH_C1 * z, -SH_C1 * x };
+    for (int b = 0; b < 3; b++) {
+        for (int c = 0; c < 3; c++) {
+            uint i = rest_idx + b * 3 + c;
+            float g = sh1[b] * vc[c];
+            adam_update_element(features_rest[i], rest_exp_avg[i], rest_exp_avg_sq[i],
+                               g, adam_hp.rest_step_size, adam_hp.beta1, adam_hp.beta2, adam_hp.rest_bc2_sqrt, adam_hp.eps);
+        }
+    }
+
+    if (degrees_to_use < 2) return;
+
+    // SH degree 2 (5 bases)
+    float sh2[5] = {
+        SH_C2[0] * xy,
+        SH_C2[1] * yz,
+        SH_C2[2] * (2.f * zz - xx - yy),
+        SH_C2[3] * xz,
+        SH_C2[4] * (xx - yy)
+    };
+    for (int b = 0; b < 5; b++) {
+        for (int c = 0; c < 3; c++) {
+            uint i = rest_idx + (3 + b) * 3 + c;
+            float g = sh2[b] * vc[c];
+            adam_update_element(features_rest[i], rest_exp_avg[i], rest_exp_avg_sq[i],
+                               g, adam_hp.rest_step_size, adam_hp.beta1, adam_hp.beta2, adam_hp.rest_bc2_sqrt, adam_hp.eps);
+        }
+    }
+
+    if (degrees_to_use < 3) return;
+
+    // SH degree 3 (7 bases)
+    float sh3[7] = {
+        SH_C3[0] * y * (3.f * xx - yy),
+        SH_C3[1] * xy * z,
+        SH_C3[2] * y * (4.f * zz - xx - yy),
+        SH_C3[3] * z * (2.f * zz - 3.f * xx - 3.f * yy),
+        SH_C3[4] * x * (4.f * zz - xx - yy),
+        SH_C3[5] * z * (xx - yy),
+        SH_C3[6] * x * (xx - 3.f * yy)
+    };
+    for (int b = 0; b < 7; b++) {
+        for (int c = 0; c < 3; c++) {
+            uint i = rest_idx + (8 + b) * 3 + c;
+            float g = sh3[b] * vc[c];
+            adam_update_element(features_rest[i], rest_exp_avg[i], rest_exp_avg_sq[i],
+                               g, adam_hp.rest_step_size, adam_hp.beta1, adam_hp.beta2, adam_hp.rest_bc2_sqrt, adam_hp.eps);
+        }
+    }
 }
 
 // ===== Pack Sorted Gaussians Kernel =====

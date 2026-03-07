@@ -4,12 +4,14 @@
 #include <numeric>
 #include <cmath>
 #include <iostream>
+#include <iomanip>
 #include <CLI/CLI.hpp>
 #include "model.hpp"
 #include "input_data.hpp"
 #include "random_iter.hpp"
 #include "loaders.hpp"
 #include "msplat.hpp"
+#include "bindings.h"
 
 namespace fs = std::filesystem;
 
@@ -216,7 +218,47 @@ int main(int argc, char *argv[]) {
             std::cout << "\n  --- CPU dispatch vs GPU drain ---\n";
             std::cout << "  cpu dispatch:  mean=" << cpu_mean << "  median=" << cpu_med << " ms\n";
             std::cout << "  gpu drain:     mean=" << drain_mean << "  median=" << drain_med << " ms\n";
-            std::cout << "  gpu fraction:  " << (drain_med / median * 100) << "%\n\n";
+            std::cout << "  gpu fraction:  " << (drain_med / median * 100) << "%\n";
+
+            // GPU timing from completion handlers (PROFILE_GPU=1)
+            std::vector<double> gpu_times;
+            msplat_drain_gpu_times(gpu_times);
+            if (!gpu_times.empty()) {
+                auto [gpu_mean, gpu_med] = stats(gpu_times);
+                std::vector<double> gs = gpu_times;
+                std::sort(gs.begin(), gs.end());
+                std::cout << "\n  --- GPU kernel time (from CB completion handlers) ---\n";
+                std::cout << "  gpu exec:   mean=" << gpu_mean << "  median=" << gpu_med << " ms\n";
+                std::cout << "  gpu p5:     " << gs[(size_t)(gs.size() * 0.05)] << " ms\n";
+                std::cout << "  gpu p95:    " << gs[(size_t)(gs.size() * 0.95)] << " ms\n";
+                std::cout << "  gpu min:    " << gs.front() << " ms\n";
+                std::cout << "  gpu max:    " << gs.back() << " ms\n";
+                std::cout << "  n_cbs:      " << gs.size() << "\n";
+            }
+
+            // Per-stage GPU timing (PROFILE_STAGES=1)
+            constexpr int MAX_STAGES = 16;
+            std::vector<double> stage_times[MAX_STAGES];
+            const char* stage_names[MAX_STAGES] = {};
+            int n_stages = 0;
+            msplat_drain_stage_times(stage_times, MAX_STAGES, n_stages, stage_names);
+            bool has_stage_data = false;
+            for (int i = 0; i < n_stages; i++) if (!stage_times[i].empty()) { has_stage_data = true; break; }
+            if (has_stage_data) {
+                std::cout << "\n  --- Per-stage GPU time (Metal timestamp counters) ---\n";
+                double total_med = 0;
+                for (int i = 0; i < n_stages; i++) {
+                    if (stage_times[i].empty()) continue;
+                    auto [s_mean, s_med] = stats(stage_times[i]);
+                    total_med += s_med;
+                    std::cout << "  " << std::left << std::setw(22) << stage_names[i]
+                              << "median=" << std::fixed << std::setprecision(3) << s_med
+                              << "ms  mean=" << s_mean << "ms  (" << stage_times[i].size() << " samples)\n";
+                }
+                std::cout << "  " << std::left << std::setw(22) << "TOTAL (sum medians)"
+                          << std::fixed << std::setprecision(3) << total_med << "ms\n";
+            }
+            std::cout << "\n";
         }
 
         inputData.saveCameras((fs::path(outputScene).parent_path() / "cameras.json").string(), keepCrs);

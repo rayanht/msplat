@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.1.3 — Fused SH backward + Adam
+
+- **Fused SH backward into Adam optimizer** — spherical harmonics gradients are now
+  computed in registers and fed directly into Adam updates, eliminating a ~600 MB/iter
+  device memory round-trip (at 1.5M gaussians). This is the dominant memory bandwidth
+  cost for the `proj_sh_bwd_adam` stage.
+- **8–23% faster training** across mipnerf360 scenes. Improvement scales with gaussian
+  count: garden 30K (3.5M gaussians) sees the largest speedup at 23%.
+- **Per-stage GPU profiling** — `PROFILE_STAGES=1` enables Metal timestamp counter
+  sampling per pipeline stage. Uses separate compute encoders on the same command buffer
+  with `MTLComputePassDescriptor` for zero-overhead timestamp capture.
+- **GPU timing instrumentation** — `PROFILE_GPU=1` adds completion handler timing to
+  command buffers, reporting per-CB GPU execution time without affecting the
+  `commitAndContinue` pipeline.
+
 ## v1.1.2
 
 - Added `py.typed` marker (PEP 561) — type checkers now discover stubs automatically

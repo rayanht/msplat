@@ -24,6 +24,14 @@ void msplat_commit();
 // Synchronize (commit + wait for completion)
 void msplat_gpu_sync();
 
+// GPU timing — non-invasive, uses completion handlers on committed CBs
+void msplat_enable_gpu_timing(bool enable);
+// Drains accumulated GPU times (ms per CB) into the provided vector. Thread-safe.
+void msplat_drain_gpu_times(std::vector<double>& out);
+// Drains per-stage GPU times. stage_times must be an array of N_STAGES vectors.
+void msplat_drain_stage_times(std::vector<double> stage_times[], int max_stages, int& n_stages,
+                              const char** stage_names);
+
 // Render-only forward pass (no loss computation)
 // Returns: out_img (H, W, 3) as MTensor
 MTensor msplat_render(
