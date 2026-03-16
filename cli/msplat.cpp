@@ -113,17 +113,25 @@ int main(int argc, char *argv[]) {
             size_t total = inputData.cameras.size();
             std::atomic<size_t> loaded{0};
             std::atomic<size_t> *loadedPtr = &loaded;
+            std::exception_ptr loadErr{};
+            std::exception_ptr *errPtr = &loadErr;
             Camera *cams = inputData.cameras.data();
             float dsf = downScaleFactor;
             std::string md = maskDir;
             dispatch_apply(total, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
                 ^(size_t i) {
-                    cams[i].loadImage(dsf, md);
+                    try {
+                        cams[i].loadImage(dsf, md);
+                    } catch (...) {
+                        *errPtr = std::current_exception();
+                        return;
+                    }
                     size_t done = loadedPtr->fetch_add(1, std::memory_order_relaxed) + 1;
                     if (done % 10 == 0 || done == total)
                         fprintf(stderr, "\rLoading images ... %zu/%zu", done, total);
                 });
             fprintf(stderr, "\rLoading images ... %zu/%zu\n", total, total);
+            if (loadErr) std::rethrow_exception(loadErr);
         }
 
         std::vector<Camera> cams;
