@@ -375,6 +375,9 @@ struct FusedTensorCache {
     MTensor chunk_T, chunk_C, chunk_final_idx;
     MTensor prefix_T, after_C;
 
+    // Dummy 1-element buffer for no-mask path (Metal requires valid buffer at bound index)
+    MTensor dummy_mask;
+
     // Backward gradient accumulators
     MTensor v_rendered;
     MTensor v_xy, v_conic, v_colors_rast, v_opacity, v_depth;
@@ -851,8 +854,9 @@ std::tuple<MTensor, float> msplat_train_step(
 
     // --- Mask setup ---
     int has_mask_val = (mask && mask->defined()) ? 1 : 0;
-    // Dummy 4-byte buffer when no mask (Metal requires valid buffer at bound index)
-    MTensor mask_buf = has_mask_val ? *mask : gpu_empty({1}, DType::Float32);
+    if (!has_mask_val && !g_tcache.dummy_mask.defined())
+        g_tcache.dummy_mask = gpu_empty({1}, DType::Float32);
+    MTensor mask_buf = has_mask_val ? *mask : g_tcache.dummy_mask;
 
     // --- Constants (heap-allocated for Obj-C block capture) ---
     auto loss_img_size = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});

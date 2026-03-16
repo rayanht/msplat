@@ -48,6 +48,10 @@ void Camera::loadImage(float downscaleFactor, const std::string &maskDir) {
     Mask rawMask;
     if (!maskPath.empty()) rawMask = imreadMask(maskPath);
 
+    // Ensure mask matches image dimensions (resize if mismatched)
+    if (!rawMask.empty() && (rawMask.width != raw.width || rawMask.height != raw.height))
+        rawMask = resizeAreaMask(rawMask, raw.width, raw.height);
+
     // If actual image dimensions differ from metadata, rescale intrinsics
     if (width > 0 && height > 0 && (raw.width != width || raw.height != height)) {
         float sx = (float)raw.width / (float)width;
