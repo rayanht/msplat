@@ -14,9 +14,39 @@ using json = nlohmann::json;
 
 // ── Image loading ───────────────────────────────────────────────────────────
 
-void Camera::loadImage(float downscaleFactor) {
+// Try to find a mask file matching the image filename stem.
+// If maskDir is provided, search there; otherwise look for a sibling masks/ directory.
+static std::string findMaskPath(const std::string &imagePath, const std::string &maskDir) {
+    fs::path imgPath(imagePath);
+    std::string stem = imgPath.stem().string();
+
+    fs::path masksDir;
+    if (!maskDir.empty()) {
+        masksDir = maskDir;
+    } else {
+        // Auto-discover: dataset/images/foo.jpg → dataset/masks/foo.*
+        masksDir = imgPath.parent_path().parent_path() / "masks";
+    }
+    if (!fs::exists(masksDir) || !fs::is_directory(masksDir))
+        return "";
+
+    // Match by stem (any extension)
+    for (auto &entry : fs::directory_iterator(masksDir)) {
+        if (!entry.is_regular_file()) continue;
+        if (entry.path().stem().string() == stem)
+            return entry.path().string();
+    }
+    return "";
+}
+
+void Camera::loadImage(float downscaleFactor, const std::string &maskDir) {
     Image raw = imreadRGB(filePath);
     if (raw.empty()) return;
+
+    // Try loading a matching mask
+    std::string maskPath = findMaskPath(filePath, maskDir);
+    Mask rawMask;
+    if (!maskPath.empty()) rawMask = imreadMask(maskPath);
 
     // If actual image dimensions differ from metadata, rescale intrinsics
     if (width > 0 && height > 0 && (raw.width != width || raw.height != height)) {
@@ -33,6 +63,7 @@ void Camera::loadImage(float downscaleFactor) {
         int newW = (int)(width / downscaleFactor);
         int newH = (int)(height / downscaleFactor);
         raw = resizeArea(raw, newW, newH);
+        if (!rawMask.empty()) rawMask = resizeAreaMask(rawMask, newW, newH);
         float s = 1.0f / downscaleFactor;
         fx *= s; fy *= s; cx *= s; cy *= s;
         width = newW; height = newH;
@@ -42,6 +73,9 @@ void Camera::loadImage(float downscaleFactor) {
     if (hasDistortion()) {
         auto result = undistortImage(raw, fx, fy, cx, cy, k1, k2, p1, p2, k3);
         raw = std::move(result.image);
+        if (!rawMask.empty())
+            rawMask = undistortMask(rawMask, fx, fy, cx, cy, k1, k2, p1, p2, k3,
+                                    result.roiX, result.roiY, result.width, result.height);
         fx = result.fx; fy = result.fy;
         cx = result.cx; cy = result.cy;
         width = result.width; height = result.height;
@@ -49,6 +83,7 @@ void Camera::loadImage(float downscaleFactor) {
     }
 
     image = std::move(raw);
+    if (!rawMask.empty()) mask = std::move(rawMask);
 }
 
 Image Camera::getImage(int downscaleFactor) {
@@ -72,6 +107,30 @@ MTensor& Camera::getGPUImage(int downscaleFactor) {
     memcpy(mt.data_ptr(), img.ptr(), img.width * img.height * 3 * sizeof(float));
     mtensorImageCache[downscaleFactor] = mt;
     return mtensorImageCache[downscaleFactor];
+}
+
+Mask Camera::getMask(int downscaleFactor) {
+    if (mask.empty()) return {};
+    if (downscaleFactor <= 1) return mask;
+
+    auto it = maskPyramids.find(downscaleFactor);
+    if (it != maskPyramids.end()) return it->second;
+
+    int newW = mask.width / downscaleFactor;
+    int newH = mask.height / downscaleFactor;
+    Mask scaled = resizeAreaMask(mask, newW, newH);
+    maskPyramids[downscaleFactor] = scaled;
+    return scaled;
+}
+
+MTensor& Camera::getGPUMask(int downscaleFactor) {
+    auto it = mtensorMaskCache.find(downscaleFactor);
+    if (it != mtensorMaskCache.end()) return it->second;
+    Mask m = getMask(downscaleFactor);
+    MTensor mt = gpu_empty({m.height, m.width, 1}, DType::Float32);
+    memcpy(mt.data_ptr(), m.ptr(), m.width * m.height * sizeof(float));
+    mtensorMaskCache[downscaleFactor] = mt;
+    return mtensorMaskCache[downscaleFactor];
 }
 
 // ── Scale & center ──────────────────────────────────────────────────────────

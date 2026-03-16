@@ -37,7 +37,7 @@ struct Model{
     float cam_pos[3];
   };
   CamSetup prepareCam(Camera& cam, int step);
-  void fullIteration(Camera& cam, int step, MTensor &gt, float ssimWeight);
+  void fullIteration(Camera& cam, int step, MTensor &gt, float ssimWeight, MTensor *mask = nullptr);
   MTensor render(Camera& cam, int step);
 
   MTensor means;
