@@ -18,7 +18,9 @@ Points readColmapPoints(const std::string &path);
 
 // Image I/O
 Image imreadRGB(const std::string &path);       // returns float32 [0,1] directly
+Mask imreadMask(const std::string &path);        // returns single-channel float32 [0,1]
 Image resizeArea(const Image &src, int dstW, int dstH);  // box-filter downscale
+Mask resizeAreaMask(const Mask &src, int dstW, int dstH);  // box-filter downscale (single channel)
 void imwriteRGB(const std::string &path, const Image &img);  // save as PNG
 
 // Undistortion (Brown-Conrady model, alpha=0 crop)
@@ -26,10 +28,15 @@ struct UndistortResult {
     Image image;
     float fx, fy, cx, cy;  // updated intrinsics after crop
     int width, height;      // cropped dimensions
+    int roiX, roiY;         // crop origin in undistorted full-size image
 };
 UndistortResult undistortImage(const Image &src,
     float fx, float fy, float cx, float cy,
     float k1, float k2, float p1, float p2, float k3);
+Mask undistortMask(const Mask &src,
+    float fx, float fy, float cx, float cy,
+    float k1, float k2, float p1, float p2, float k3,
+    int roiX, int roiY, int roiW, int roiH);
 
 // Pose utilities
 void autoScaleAndCenter(InputData &data);

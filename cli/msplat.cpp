@@ -91,6 +91,9 @@ int main(int argc, char *argv[]) {
         ->expected(3);
     std::string colmapImagePath;
     app.add_option("--colmap-image-path", colmapImagePath, "Override COLMAP image directory");
+    std::string maskDir;
+    app.add_option("--mask-dir", maskDir, "Directory containing mask images (default: auto-detect masks/ sibling)")
+        ->check(CLI::ExistingDirectory);
 
     CLI11_PARSE(app, argc, argv);
 
@@ -102,7 +105,7 @@ int main(int argc, char *argv[]) {
         InputData inputData = inputDataFromX(projectRoot, colmapImagePath);
 
         for (auto &cam : inputData.cameras)
-            cam.loadImage(downScaleFactor);
+            cam.loadImage(downScaleFactor, maskDir);
 
         std::vector<Camera> cams;
         std::vector<Camera> testCams;
@@ -115,6 +118,14 @@ int main(int argc, char *argv[]) {
         } else {
             auto [train, val] = inputData.getCameras(validate, valImage);
             cams = train; valCam = val;
+        }
+
+        // Report mask detection
+        {
+            int maskCount = 0;
+            for (auto &c : cams) if (c.hasMask()) maskCount++;
+            if (maskCount > 0)
+                std::cout << "Masks: " << maskCount << "/" << cams.size() << " cameras" << std::endl;
         }
 
         Model model(inputData, cams.size(),
@@ -147,7 +158,8 @@ int main(int argc, char *argv[]) {
 
             auto iter_start = cpu_now();
             MTensor gt = cam.getGPUImage(model.getDownscaleFactor(step));
-            model.fullIteration(cam, step, gt, ssimWeight);
+            MTensor *maskPtr = cam.hasMask() ? &cam.getGPUMask(model.getDownscaleFactor(step)) : nullptr;
+            model.fullIteration(cam, step, gt, ssimWeight, maskPtr);
             model.schedulersStep(step);
             model.afterTrain(step);
             msplat_commit();

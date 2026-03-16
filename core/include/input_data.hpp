@@ -17,6 +17,16 @@ struct Image {
     const float* ptr() const { return data.data(); }
 };
 
+// Single-channel float32 mask [0,1]. White=keep, black=ignore.
+struct Mask {
+    std::vector<float> data;  // width * height floats, [0,1]
+    int width = 0, height = 0;
+
+    bool empty() const { return data.empty(); }
+    float* ptr() { return data.data(); }
+    const float* ptr() const { return data.data(); }
+};
+
 struct Camera {
     int width = 0, height = 0;
     float fx = 0, fy = 0, cx = 0, cy = 0;
@@ -25,15 +35,21 @@ struct Camera {
     std::string filePath;
 
     Image image;
+    Mask mask;
     std::unordered_map<int, Image> imagePyramids;
+    std::unordered_map<int, Mask> maskPyramids;
     std::unordered_map<int, MTensor> mtensorImageCache;
+    std::unordered_map<int, MTensor> mtensorMaskCache;
     MTensor cachedViewMat, cachedProjViewMat;
     float cachedCamPos[3] = {};
     float cachedFovX = 0, cachedFovY = 0;
 
-    void loadImage(float downscaleFactor);
+    void loadImage(float downscaleFactor, const std::string &maskDir = "");
     Image getImage(int downscaleFactor);
+    Mask getMask(int downscaleFactor);
     MTensor& getGPUImage(int downscaleFactor);
+    MTensor& getGPUMask(int downscaleFactor);
+    bool hasMask() const { return !mask.empty(); }
     bool hasDistortion() const { return k1 != 0 || k2 != 0 || k3 != 0 || p1 != 0 || p2 != 0; }
 };
 

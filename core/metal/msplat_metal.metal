@@ -3228,6 +3228,8 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
     constant float* ssim_h_buf, constant uint2& img_size,
     constant float& ssim_weight, constant float& inv_n,
     device float* deriv_h_buf, device atomic_float* loss_sum,
+    constant float* mask [[buffer(8)]],
+    constant int& has_mask [[buffer(9)]],
     uint2 gid [[thread_position_in_grid]], uint2 lid [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]], uint2 tgid [[threadgroup_position_in_grid]],
     uint2 tg_size [[threads_per_threadgroup]]
@@ -3301,6 +3303,7 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
     }
 
     float pixel_loss = (px < W && py < H) ? ssim_weight*(1.0f-ssim_sum/3.0f) + (1.0f-ssim_weight)*l1_sum/3.0f : 0.0f;
+    if (has_mask && px < W && py < H) pixel_loss *= mask[py * W + px];
     threadgroup float tg_sum[256];
     tg_sum[tr] = pixel_loss;
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -3401,6 +3404,8 @@ kernel void ssim_v_bwd_kernel(
     constant float& ssim_weight,
     constant float& inv_n,          // 1.0 / (H * W * 3)
     device float* v_rendered,       // (H, W, 3)
+    constant float* mask [[buffer(7)]],
+    constant int& has_mask [[buffer(8)]],
     uint2 gid [[thread_position_in_grid]],
     uint2 lid [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]],
@@ -3456,9 +3461,11 @@ kernel void ssim_v_bwd_kernel(
             float v_ssim = conv_f1 + rend_val * conv_f2 + gt_val * conv_f3;
             float v_l1 = (gt_val > rend_val) ? -1.0f : ((gt_val < rend_val) ? 1.0f : 0.0f);
 
-            v_rendered[(py * W + px) * 3 + c] = inv_n * (
+            float grad = inv_n * (
                 -ssim_weight * v_ssim + (1.0f - ssim_weight) * v_l1
             );
+            if (has_mask) grad *= mask[py * W + px];
+            v_rendered[(py * W + px) * 3 + c] = grad;
         }
     }
 }
