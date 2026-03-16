@@ -4,6 +4,7 @@
 #include <nanoflann.hpp>
 #include <vector>
 #include <cmath>
+#include <cassert>
 #include <dispatch/dispatch.h>
 
 // nanoflann adapter for a flat float array of 3D points.
@@ -24,7 +25,9 @@ struct PointsTensor {
         PointsTensor, 3, size_t>;
 
     // Compute mean distance to k nearest neighbors for each point.
+    static constexpr int kMaxK = 16;
     std::vector<float> scales(int k = 4) const {
+        assert(k <= kMaxK && "k exceeds kMaxK for stack-allocated KNN buffers");
         KdTree index(3, *this, {10});
         const KdTree *idx = &index;
 
@@ -33,8 +36,8 @@ struct PointsTensor {
         const float *dp = data;
         dispatch_apply((size_t)count, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
             ^(size_t i) {
-                size_t indices[4];
-                float dists[4];
+                size_t indices[kMaxK];
+                float dists[kMaxK];
                 idx->knnSearch(&dp[i * 3], k, indices, dists);
                 float sum = 0;
                 for (int j = 1; j < k; j++) sum += std::sqrt(dists[j]);
