@@ -5,6 +5,8 @@
 #include <cmath>
 #include <iostream>
 #include <iomanip>
+#include <atomic>
+#include <dispatch/dispatch.h>
 #include <CLI/CLI.hpp>
 #include "model.hpp"
 #include "input_data.hpp"
@@ -91,6 +93,9 @@ int main(int argc, char *argv[]) {
         ->expected(3);
     std::string colmapImagePath;
     app.add_option("--colmap-image-path", colmapImagePath, "Override COLMAP image directory");
+    std::string maskDir;
+    app.add_option("--mask-dir", maskDir, "Directory containing mask images (default: auto-detect masks/ sibling)")
+        ->check(CLI::ExistingDirectory);
 
     CLI11_PARSE(app, argc, argv);
 
@@ -99,10 +104,35 @@ int main(int argc, char *argv[]) {
     downScaleFactor = std::max(downScaleFactor, 1.0f);
 
     try {
+        std::cout << "Loading dataset from " << projectRoot << " ..." << std::flush;
         InputData inputData = inputDataFromX(projectRoot, colmapImagePath);
+        std::cout << " " << inputData.cameras.size() << " cameras, "
+                  << inputData.points.count << " points" << std::endl;
 
-        for (auto &cam : inputData.cameras)
-            cam.loadImage(downScaleFactor);
+        {
+            size_t total = inputData.cameras.size();
+            std::atomic<size_t> loaded{0};
+            std::atomic<size_t> *loadedPtr = &loaded;
+            std::exception_ptr loadErr{};
+            std::exception_ptr *errPtr = &loadErr;
+            Camera *cams = inputData.cameras.data();
+            float dsf = downScaleFactor;
+            std::string md = maskDir;
+            dispatch_apply(total, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                ^(size_t i) {
+                    try {
+                        cams[i].loadImage(dsf, md);
+                    } catch (...) {
+                        *errPtr = std::current_exception();
+                        return;
+                    }
+                    size_t done = loadedPtr->fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (done % 10 == 0 || done == total)
+                        fprintf(stderr, "\rLoading images ... %zu/%zu", done, total);
+                });
+            fprintf(stderr, "\rLoading images ... %zu/%zu\n", total, total);
+            if (loadErr) std::rethrow_exception(loadErr);
+        }
 
         std::vector<Camera> cams;
         std::vector<Camera> testCams;
@@ -117,12 +147,22 @@ int main(int argc, char *argv[]) {
             cams = train; valCam = val;
         }
 
+        // Report mask detection
+        {
+            int maskCount = 0;
+            for (auto &c : cams) if (c.hasMask()) maskCount++;
+            if (maskCount > 0)
+                std::cout << "Masks: " << maskCount << "/" << cams.size() << " cameras" << std::endl;
+        }
+
+        std::cout << "Initializing model (" << inputData.points.count << " points) ..." << std::flush;
         Model model(inputData, cams.size(),
                      numDownscales, resolutionSchedule, shDegree, shDegreeInterval,
                      refineEvery, warmupLength, resetAlphaEvery, densifyGradThresh,
                      densifySizeThresh, stopScreenSizeAt, splitScreenSize,
                      numIters, keepCrs,
                      bgColor.data());
+        std::cout << " done" << std::endl;
 
         std::vector<size_t> camIndices(cams.size());
         std::iota(camIndices.begin(), camIndices.end(), 0);
@@ -141,16 +181,28 @@ int main(int argc, char *argv[]) {
         }
         auto cpu_now = []() { return std::chrono::high_resolution_clock::now(); };
 
+        std::cout << "Training " << numIters << " iterations ..." << std::endl;
+        int progressInterval = std::max(1, numIters / 20);
+
         auto bench_start = cpu_now();
         for (; step <= (size_t)numIters; step++) {
             Camera &cam = cams[camsIter.next()];
 
             auto iter_start = cpu_now();
             MTensor gt = cam.getGPUImage(model.getDownscaleFactor(step));
-            model.fullIteration(cam, step, gt, ssimWeight);
+            MTensor *maskPtr = cam.hasMask() ? &cam.getGPUMask(model.getDownscaleFactor(step)) : nullptr;
+            model.fullIteration(cam, step, gt, ssimWeight, maskPtr);
             model.schedulersStep(step);
             model.afterTrain(step);
             msplat_commit();
+
+            if (step % progressInterval == 0 || step == (size_t)numIters) {
+                double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(cpu_now() - bench_start).count() / 1000.0;
+                std::cout << "  step " << step << "/" << numIters
+                          << "  splats=" << model.means.size(0)
+                          << "  elapsed=" << std::fixed << std::setprecision(1) << elapsed << "s"
+                          << std::endl;
+            }
 
             if (benchmarking && step > (size_t)bench_warmup) {
                 auto pre_sync = cpu_now();
@@ -261,6 +313,7 @@ int main(int argc, char *argv[]) {
             std::cout << "\n";
         }
 
+        std::cout << "\nSaving to " << outputScene << " ..." << std::endl;
         inputData.saveCameras((fs::path(outputScene).parent_path() / "cameras.json").string(), keepCrs);
         model.save(outputScene, numIters);
 

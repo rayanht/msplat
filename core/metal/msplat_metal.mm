@@ -375,6 +375,9 @@ struct FusedTensorCache {
     MTensor chunk_T, chunk_C, chunk_final_idx;
     MTensor prefix_T, after_C;
 
+    // Dummy 1-element buffer for no-mask path (Metal requires valid buffer at bound index)
+    MTensor dummy_mask;
+
     // Backward gradient accumulators
     MTensor v_rendered;
     MTensor v_xy, v_conic, v_colors_rast, v_opacity, v_depth;
@@ -784,7 +787,8 @@ std::tuple<MTensor, float> msplat_train_step(
     float adam_step_sizes[], float adam_bc2_sqrts[],
     float adam_beta1, float adam_beta2, float adam_eps,
     MTensor &vis_counts, MTensor &xys_grad_norm, MTensor &max_2d_size,
-    float inv_max_dim
+    float inv_max_dim,
+    MTensor *mask
 ) {
     MetalContext* ctx = get_global_context();
     int tile_bounds_x = std::get<0>(tile_bounds);
@@ -847,6 +851,12 @@ std::tuple<MTensor, float> msplat_train_step(
     // Wire backward outputs as Adam grads (MTensor references for gradient buffers)
     auto adam_grads = std::make_shared<std::array<MTensor, 6>>(
         std::array<MTensor, 6>{v_mean3d, v_scale, v_quat, v_features_dc, v_features_rest, v_opacity});
+
+    // --- Mask setup ---
+    int has_mask_val = (mask && mask->defined()) ? 1 : 0;
+    if (!has_mask_val && !g_tcache.dummy_mask.defined())
+        g_tcache.dummy_mask = gpu_empty({1}, DType::Float32);
+    MTensor mask_buf = has_mask_val ? *mask : g_tcache.dummy_mask;
 
     // --- Constants (heap-allocated for Obj-C block capture) ---
     auto loss_img_size = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
@@ -1013,6 +1023,7 @@ std::tuple<MTensor, float> msplat_train_step(
         [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:3];
         ENC_SCALAR(enc, ssim_weight, 4); ENC_SCALAR(enc, loss_inv_n, 5);
         ENC_BUF(enc, loss_intermediates, 6); ENC_BUF(enc, loss_sum, 7);
+        ENC_BUF(enc, mask_buf, 8); ENC_SCALAR(enc, has_mask_val, 9);
         [enc dispatchThreads:grid threadsPerThreadgroup:tg];
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         // Pass 3: V bwd
@@ -1022,6 +1033,7 @@ std::tuple<MTensor, float> msplat_train_step(
         [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:3];
         ENC_SCALAR(enc, ssim_weight, 4); ENC_SCALAR(enc, loss_inv_n, 5);
         ENC_BUF(enc, v_rendered, 6);
+        ENC_BUF(enc, mask_buf, 7); ENC_SCALAR(enc, has_mask_val, 8);
         [enc dispatchThreads:grid threadsPerThreadgroup:tg];
     };
 

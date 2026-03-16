@@ -54,6 +54,81 @@ Image imreadRGB(const std::string &path) {
     return img;
 }
 
+// ── Mask loading (CoreGraphics, single-channel) ─────────────────────────────
+
+Mask imreadMask(const std::string &path) {
+    CFStringRef cfPath = CFStringCreateWithCString(nullptr, path.c_str(), kCFStringEncodingUTF8);
+    CFURLRef url = CFURLCreateWithFileSystemPath(nullptr, cfPath, kCFURLPOSIXPathStyle, false);
+    CFRelease(cfPath);
+
+    CGImageSourceRef source = CGImageSourceCreateWithURL(url, nullptr);
+    CFRelease(url);
+    if (!source) throw std::runtime_error("Failed to load mask: " + path);
+
+    CGImageRef cgImage = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
+    CFRelease(source);
+    if (!cgImage) throw std::runtime_error("Failed to decode mask: " + path);
+
+    int w = (int)CGImageGetWidth(cgImage);
+    int h = (int)CGImageGetHeight(cgImage);
+
+    // Render into RGBA buffer
+    std::vector<uint8_t> rgba(w * h * 4);
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(
+        rgba.data(), w, h, 8, w * 4, colorSpace,
+        kCGImageAlphaNoneSkipLast | kCGBitmapByteOrderDefault
+    );
+    CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cgImage);
+    CGContextRelease(ctx);
+    CGColorSpaceRelease(colorSpace);
+    CGImageRelease(cgImage);
+
+    // Convert to grayscale via luminance (handles colored masks correctly)
+    Mask m;
+    m.width = w;
+    m.height = h;
+    m.data.resize(w * h);
+    for (int i = 0; i < w * h; i++)
+        m.data[i] = (0.299f * rgba[i * 4] + 0.587f * rgba[i * 4 + 1] + 0.114f * rgba[i * 4 + 2]) / 255.0f;
+    return m;
+}
+
+// ── Area-based mask resize (box filter, single channel) ─────────────────────
+
+Mask resizeAreaMask(const Mask &src, int dstW, int dstH) {
+    Mask dst;
+    dst.width = dstW;
+    dst.height = dstH;
+    dst.data.resize(dstW * dstH, 0.0f);
+
+    float scaleX = (float)src.width / dstW;
+    float scaleY = (float)src.height / dstH;
+
+    for (int dy = 0; dy < dstH; dy++) {
+        float srcY0 = dy * scaleY;
+        float srcY1 = (dy + 1) * scaleY;
+        for (int dx = 0; dx < dstW; dx++) {
+            float srcX0 = dx * scaleX;
+            float srcX1 = (dx + 1) * scaleX;
+            float sum = 0, totalArea = 0;
+            int iy0 = (int)srcY0, iy1 = std::min((int)std::ceil(srcY1), src.height);
+            int ix0 = (int)srcX0, ix1 = std::min((int)std::ceil(srcX1), src.width);
+            for (int iy = iy0; iy < iy1; iy++) {
+                float wy = std::min((float)(iy + 1), srcY1) - std::max((float)iy, srcY0);
+                for (int ix = ix0; ix < ix1; ix++) {
+                    float wx = std::min((float)(ix + 1), srcX1) - std::max((float)ix, srcX0);
+                    float area = wx * wy;
+                    sum += src.data[iy * src.width + ix] * area;
+                    totalArea += area;
+                }
+            }
+            dst.data[dy * dstW + dx] = sum / totalArea;
+        }
+    }
+    return dst;
+}
+
 // ── Image writing (CoreGraphics PNG) ─────────────────────────────────────────
 
 void imwriteRGB(const std::string &path, const Image &img) {
@@ -319,5 +394,60 @@ UndistortResult undistortImage(const Image &src,
     result.cy = cy - roiY;
     result.width = roiW;
     result.height = roiH;
+    result.roiX = roiX;
+    result.roiY = roiY;
     return result;
+}
+
+// ── Mask undistortion (same remap + crop as image) ──────────────────────────
+
+static float bilinearSampleMask(const Mask &m, float x, float y) {
+    int x0 = (int)std::floor(x), y0 = (int)std::floor(y);
+    int x1 = x0 + 1, y1 = y0 + 1;
+    x0 = std::clamp(x0, 0, m.width - 1);
+    x1 = std::clamp(x1, 0, m.width - 1);
+    y0 = std::clamp(y0, 0, m.height - 1);
+    y1 = std::clamp(y1, 0, m.height - 1);
+    float fx = x - std::floor(x), fy = y - std::floor(y);
+    float top    = m.data[y0 * m.width + x0] * (1.0f - fx) + m.data[y0 * m.width + x1] * fx;
+    float bottom = m.data[y1 * m.width + x0] * (1.0f - fx) + m.data[y1 * m.width + x1] * fx;
+    return top * (1.0f - fy) + bottom * fy;
+}
+
+Mask undistortMask(const Mask &src,
+    float fx, float fy, float cx, float cy,
+    float k1, float k2, float p1, float p2, float k3,
+    int roiX, int roiY, int roiW, int roiH)
+{
+    int w = src.width, h = src.height;
+
+    // Remap: for each pixel in undistorted space, find source in distorted input
+    Mask undist;
+    undist.width = w;
+    undist.height = h;
+    undist.data.resize(w * h);
+
+    for (int oy = 0; oy < h; oy++) {
+        for (int ox = 0; ox < w; ox++) {
+            float x = ((float)ox - cx) / fx;
+            float y = ((float)oy - cy) / fy;
+            float xd_n, yd_n;
+            distortPoint(x, y, k1, k2, p1, p2, k3, xd_n, yd_n);
+            float srcX = xd_n * fx + cx;
+            float srcY = yd_n * fy + cy;
+            undist.data[oy * w + ox] = bilinearSampleMask(src, srcX, srcY);
+        }
+    }
+
+    // Crop to same ROI as image
+    Mask cropped;
+    cropped.width = roiW;
+    cropped.height = roiH;
+    cropped.data.resize(roiW * roiH);
+    for (int y = 0; y < roiH; y++) {
+        memcpy(&cropped.data[y * roiW],
+               &undist.data[(y + roiY) * w + roiX],
+               roiW * sizeof(float));
+    }
+    return cropped;
 }

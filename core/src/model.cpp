@@ -543,7 +543,7 @@ MTensor Model::render(Camera& cam, int step){
         opacities, backgroundColor);
 }
 
-void Model::fullIteration(Camera& cam, int step, MTensor &gt, float ssimWeight){
+void Model::fullIteration(Camera& cam, int step, MTensor &gt, float ssimWeight, MTensor *mask){
     auto s = prepareCam(cam, step);
     lastHeight = s.height; lastWidth = s.width;
     int numPoints = means.size(0);
@@ -591,7 +591,7 @@ void Model::fullIteration(Camera& cam, int step, MTensor &gt, float ssimWeight){
         adam_p, adam_ea, adam_eas,
         adam_ss, adam_bc2s,
         adam_beta1, adam_beta2, adam_eps,
-        visCounts, xysGradNorm, max2DSize, invMaxDim);
+        visCounts, xysGradNorm, max2DSize, invMaxDim, mask);
 
     radii = r;
 }
