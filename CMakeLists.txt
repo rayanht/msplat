@@ -106,7 +106,7 @@ add_dependencies(msplat_core metallib)
 
 # --- CLI binary ---
 
-add_executable(msplat cli/msplat.cpp)
+add_executable(msplat cli/msplat.mm)
 target_link_libraries(msplat PRIVATE
     msplat_core
     CLI11::CLI11

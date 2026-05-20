@@ -143,6 +143,13 @@ int main(int argc, char *argv[]) {
 
         auto bench_start = cpu_now();
         for (; step <= (size_t)numIters; step++) {
+          // Per-iteration autorelease pool. Each step creates autoreleased
+          // Metal objects (command buffers, encoders, transient textures);
+          // without draining them every iteration they accumulate for the
+          // entire run and OOM-kill the process around step ~12k. Wrapping
+          // the body drains them at the end of each step. This file is
+          // compiled as Obj-C++ (.mm) so @autoreleasepool is available.
+          @autoreleasepool {
             Camera &cam = cams[camsIter.next()];
 
             auto iter_start = cpu_now();
@@ -180,6 +187,7 @@ int main(int argc, char *argv[]) {
                 memcpy(valImg.ptr(), rgb_cpu.data_ptr(), valImg.data.size() * sizeof(float));
                 imwriteRGB((fs::path(valRender) / (std::to_string(step) + ".png")).string(), valImg);
             }
+          } // @autoreleasepool
         }
 
         if (benchmarking && !bench_iter_ms.empty()) {
