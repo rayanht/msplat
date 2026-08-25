@@ -5,6 +5,11 @@
 #include <cstdint>
 #include <cassert>
 #include <cstring>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+#include <CoreFoundation/CoreFoundation.h>
 
 // Forward-declare the Metal buffer type for C++ compatibility.
 // Full Metal/Metal.h is only needed in .mm files.
@@ -46,7 +51,14 @@ public:
         size_t bytes = _numel * dtypeSize(_dtype);
         if (bytes == 0) bytes = 4;
         id<MTLBuffer> buf = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        if (!buf) {
+            throw std::runtime_error(
+                "msplat: MTLBuffer allocation failed for " + std::to_string(bytes) +
+                " bytes; device already holds " +
+                std::to_string((size_t)[device currentAllocatedSize]));
+        }
         _buffer = (__bridge_retained void*)buf;
+        _ownsBuffer = true;
         _data = [buf contents];  // cache CPU-accessible pointer for C++ access
     }
 
@@ -60,6 +72,44 @@ public:
         for (auto s : _shape) _numel *= s;
         size_t bytes = _numel * dtypeSize(_dtype);
         _cpu_data.resize(bytes);
+    }
+
+    ~MTensor() { releaseBuffer(); }
+
+    MTensor(const MTensor &o)
+        : _buffer(o._buffer), _data(o._data), _cpu_data(o._cpu_data),
+          _shape(o._shape), _dtype(o._dtype), _numel(o._numel),
+          _ownsBuffer(o._ownsBuffer) {
+        if (_buffer && _ownsBuffer) CFRetain(_buffer);
+    }
+
+    MTensor(MTensor &&o) noexcept
+        : _buffer(o._buffer), _data(o._data), _cpu_data(std::move(o._cpu_data)),
+          _shape(std::move(o._shape)), _dtype(o._dtype), _numel(o._numel),
+          _ownsBuffer(o._ownsBuffer) {
+        o._buffer = nullptr; o._data = nullptr; o._numel = 0; o._ownsBuffer = false;
+    }
+
+    MTensor& operator=(const MTensor &o) {
+        if (this == &o) return *this;
+        void *incoming = o._buffer;
+        bool incomingOwns = o._ownsBuffer;
+        if (incoming && incomingOwns) CFRetain(incoming);  // retain before release: o may alias us
+        releaseBuffer();
+        _buffer = incoming; _ownsBuffer = incomingOwns;
+        _data = o._data; _cpu_data = o._cpu_data;
+        _shape = o._shape; _dtype = o._dtype; _numel = o._numel;
+        return *this;
+    }
+
+    MTensor& operator=(MTensor &&o) noexcept {
+        if (this == &o) return *this;
+        releaseBuffer();
+        _buffer = o._buffer; _ownsBuffer = o._ownsBuffer;
+        _data = o._data; _cpu_data = std::move(o._cpu_data);
+        _shape = std::move(o._shape); _dtype = o._dtype; _numel = o._numel;
+        o._buffer = nullptr; o._data = nullptr; o._numel = 0; o._ownsBuffer = false;
+        return *this;
     }
 
     bool defined() const { return _buffer != nullptr || !_cpu_data.empty(); }
@@ -100,10 +150,7 @@ public:
     }
 
     void reset() {
-#ifdef __OBJC__
-        if (_buffer) { CFRelease(_buffer); }
-#endif
-        _buffer = nullptr;
+        releaseBuffer();
         _data = nullptr;
         _cpu_data.clear();
         _shape.clear();
@@ -130,16 +177,24 @@ public:
         v._shape[0] = n;
         v._dtype = _dtype;
         v._numel = n * stride0();
+        v._ownsBuffer = false;  // stays non-owning through copies
         return v;
     }
 
 private:
-    void* _buffer = nullptr;  // retained id<MTLBuffer> as void*
+    void releaseBuffer() {
+        if (_buffer && _ownsBuffer) CFRelease(_buffer);
+        _buffer = nullptr;
+        _ownsBuffer = false;
+    }
+
+    void* _buffer = nullptr;  // id<MTLBuffer> as void*, retained when _ownsBuffer
     void* _data = nullptr;    // cached CPU-accessible pointer (shared memory on Apple Silicon)
     std::vector<uint8_t> _cpu_data;
     std::vector<int64_t> _shape;
     DType _dtype = DType::Float32;
     int64_t _numel = 0;
+    bool _ownsBuffer = false;
 };
 
 // Factory helpers (Objective-C++ only)

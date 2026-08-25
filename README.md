@@ -189,7 +189,23 @@ msplat-train path/to/garden -n 30000 --num-downscales 0 --eval
 
 gsplat numbers from [docs.gsplat.studio](https://docs.gsplat.studio/main/tests/eval.html) (TITAN RTX). gsplat wall times are the reported average across *all* mipnerf360 scenes (per-scene times not published).
 
+### Progressive downscale
+
+`--num-downscales N` starts at 1/2^N resolution and doubles every
+`--resolution-schedule` steps. The default, `N=2`, spends the first 3000 steps at
+1/4 resolution and the next 3000 at 1/2, reaching full resolution for the last
+1000. It roughly halves wall time, for about 0.8 dB PSNR and 0.07 SSIM:
+
+| garden 7K | wall time | PSNR | SSIM | Gaussians |
+|---|---|---|---|---|
+| `--num-downscales 0` | 79s | 25.73 | 0.784 | 1.52M |
+| `--num-downscales 2` (default) | 36s | 24.93 | 0.716 | 715K |
+
+M4 Max, `msplat path/to/garden -n 7000 --eval`, mean of two runs.
+
 ### Performance history (wall time, M4 Max)
+
+No downscales:
 
 | Scene | v1.0 | v1.1.3 | Speedup |
 |-------|------|--------|---------|
@@ -199,7 +215,18 @@ gsplat numbers from [docs.gsplat.studio](https://docs.gsplat.studio/main/tests/e
 | room 7K | 85s | 74s | 1.15x |
 | garden 30K | 1039s | 700s | 1.48x |
 
+2 downscales (default):
+
+| Scene | v1.1.3 | v1.1.4 | Speedup |
+|-------|--------|--------|---------|
+| bicycle 7K | 46s | 33s | 1.42x |
+| counter 7K | 40s | 41s | 0.98x |
+| garden 7K | 44s | 36s | 1.22x |
+| room 7K | 38s | 39s | 0.98x |
+
 v1.1.3 fuses SH backward gradients into Adam optimizer updates, fuses the SSIM vertical-forward and horizontal-backward passes into a single kernel, and replaces the count→prefix-sum→scatter intersection pipeline with pre-allocated per-tile bins. Speedup scales with gaussian count.
+
+v1.1.4 bounds `K_max`, the number of 512-gaussian depth chunks a tile is split into, by the per-tile cap rather than by the packed buffer capacity. Chunking only engages below 400 tiles, so it affects downscaled steps only: counter and room sit at 425 tiles at 1/4 resolution and never reach it.
 
 ## License
 

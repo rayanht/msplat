@@ -5,6 +5,7 @@
 #include <cmath>
 #include <iostream>
 #include <iomanip>
+#include <map>
 #include <CLI/CLI.hpp>
 #include "model.hpp"
 #include "input_data.hpp"
@@ -134,6 +135,11 @@ int main(int argc, char *argv[]) {
         bool benchmarking = std::getenv("BENCHMARK") != nullptr;
         int bench_warmup = 50;
         std::vector<double> bench_iter_ms, bench_cpu_ms, bench_drain_ms;
+        // Bucketed by downscale factor: image size changes mid-run, so a single
+        // median hides which resolution phase the time is going to.
+        std::map<int, std::vector<double>> bench_phase_ms;
+        std::map<int, int64_t> bench_phase_gaussians;
+        double refine_total_ms = 0; int refine_count = 0;
         if (benchmarking) {
             bench_iter_ms.reserve(numIters);
             bench_cpu_ms.reserve(numIters);
@@ -141,16 +147,48 @@ int main(int argc, char *argv[]) {
         }
         auto cpu_now = []() { return std::chrono::high_resolution_clock::now(); };
 
+        // GPU trace capture: MSPLAT_GPUTRACE=<path> picks the output document,
+        // MSPLAT_GPUTRACE_STEP / _ITERS pick the window. Default lands in the
+        // full-resolution phase, which is the most expensive per iteration.
+        const char *tracePath = std::getenv("MSPLAT_GPUTRACE");
+        size_t traceStep = std::getenv("MSPLAT_GPUTRACE_STEP")
+                         ? std::stoul(std::getenv("MSPLAT_GPUTRACE_STEP")) : 6500;
+        size_t traceIters = std::getenv("MSPLAT_GPUTRACE_ITERS")
+                          ? std::stoul(std::getenv("MSPLAT_GPUTRACE_ITERS")) : 3;
+        bool capturing = false;
+
         auto bench_start = cpu_now();
         for (; step <= (size_t)numIters; step++) {
             Camera &cam = cams[camsIter.next()];
+
+            if (tracePath && !capturing && step == traceStep) {
+                msplat_gpu_sync();  // close the in-flight command buffer first
+                capturing = msplat_begin_gpu_capture(tracePath);
+                if (capturing)
+                    std::cout << "GPU capture started at step " << step
+                              << " (" << traceIters << " iters) -> " << tracePath << std::endl;
+            }
 
             auto iter_start = cpu_now();
             MTensor gt = cam.getGPUImage(model.getDownscaleFactor(step));
             model.fullIteration(cam, step, gt, ssimWeight);
             model.schedulersStep(step);
+            auto refine_start = cpu_now();
             model.afterTrain(step);
+            auto refine_end = cpu_now();
             msplat_commit();
+
+            if (capturing && step == traceStep + traceIters - 1) {
+                msplat_gpu_sync();  // drain before stopping so the window holds whole CBs
+                msplat_end_gpu_capture();
+                capturing = false;
+                std::cout << "GPU capture written: " << tracePath << std::endl;
+            }
+
+            if (benchmarking) {
+                double r_ms = std::chrono::duration_cast<std::chrono::microseconds>(refine_end - refine_start).count() / 1000.0;
+                if (r_ms > 1.0) { refine_total_ms += r_ms; refine_count++; }
+            }
 
             if (benchmarking && step > (size_t)bench_warmup) {
                 auto pre_sync = cpu_now();
@@ -162,6 +200,9 @@ int main(int argc, char *argv[]) {
                 bench_iter_ms.push_back(iter_ms);
                 bench_cpu_ms.push_back(cpu_ms);
                 bench_drain_ms.push_back(drain_ms);
+                int sf = model.getDownscaleFactor(step);
+                bench_phase_ms[sf].push_back(iter_ms);
+                bench_phase_gaussians[sf] = model.means.size(0);
             }
 
             if (saveEvery > 0 && step % saveEvery == 0) {
@@ -213,6 +254,19 @@ int main(int argc, char *argv[]) {
                 double med = (n % 2 == 0) ? (s[n/2-1] + s[n/2]) / 2.0 : s[n/2];
                 return std::make_pair(sum / n, med);
             };
+            std::cout << "\n  refine/densify: " << refine_total_ms/1000.0 << "s across "
+                      << refine_count << " steps (" << (refine_total_ms/1000.0/total_s*100) << "% of wall)\n";
+            std::cout << "\n  --- Per-resolution phase ---\n";
+            for (auto &[sf, v] : bench_phase_ms) {
+                auto [p_mean, p_med] = stats(v);
+                double p_sum = std::accumulate(v.begin(), v.end(), 0.0);
+                std::cout << "  downscale " << sf << "x  " << std::setw(4) << v.size() << " iters"
+                          << "  median=" << p_med << "ms  mean=" << p_mean << "ms"
+                          << "  total=" << (p_sum / 1000.0) << "s"
+                          << "  (" << (p_sum / (sum) * 100) << "% of train time, "
+                          << bench_phase_gaussians[sf] << " gaussians at end)\n";
+            }
+
             auto [cpu_mean, cpu_med] = stats(bench_cpu_ms);
             auto [drain_mean, drain_med] = stats(bench_drain_ms);
             std::cout << "\n  --- CPU dispatch vs GPU drain ---\n";

@@ -55,19 +55,21 @@ find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
 # --- Compile Metal shaders ---
 
 set(METAL_SOURCE ${CMAKE_SOURCE_DIR}/core/metal/msplat_metal.metal)
-configure_file(${METAL_SOURCE} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.metal COPYONLY)
+# -frecord-sources embeds the shader source in the metallib and -gline-tables-only
+# emits line tables. Xcode needs both to show shader source and per-line cost in a
+# .gputrace; without them a capture has kernel names and nothing else. Neither
+# affects codegen, so -O3 still applies.
 add_custom_command(
     OUTPUT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/default.metallib
-    COMMAND xcrun -sdk macosx metal -O3 -c
-        ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.metal
+    COMMAND xcrun -sdk macosx metal -O3 -frecord-sources -gline-tables-only -c
+        ${METAL_SOURCE}
         -o ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.air
     COMMAND xcrun -sdk macosx metallib
         ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.air
         -o ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/default.metallib
     COMMAND rm -f ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.air
-    COMMAND rm -f ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.metal
     DEPENDS ${METAL_SOURCE}
-    COMMENT "Compiling Metal kernels → default.metallib"
+    COMMENT "Compiling Metal kernels → default.metallib (sources embedded for GPU capture)"
 )
 add_custom_target(metallib ALL
     DEPENDS ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/default.metallib)

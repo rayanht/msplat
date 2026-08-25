@@ -12,7 +12,6 @@
 #import <functional>
 #import <array>
 #import <mutex>
-#import <mach/mach_time.h>
 
 // GPU profiling infrastructure.
 // PROFILE_GPU=1: per-CB total GPU time via completion handlers.
@@ -118,10 +117,9 @@ struct MetalContext {
             return;
         }
 
-        // Compute ticks-to-ms conversion (Apple Silicon: mach_absolute_time units)
-        mach_timebase_info_data_t tb;
-        mach_timebase_info(&tb);
-        ticksToMs = (double)tb.numer / (double)tb.denom / 1e6;
+        // MTLCounterResultTimestamp is in nanoseconds on Apple Silicon, not
+        // mach_absolute_time ticks.
+        ticksToMs = 1.0 / 1e6;
 
         counterSamplingAvailable = true;
         fprintf(stderr, "PROFILE_STAGES: GPU timestamp profiling enabled (%lu sample slots)\n",
@@ -317,6 +315,41 @@ void msplat_gpu_sync() {
     get_global_context()->syncCB();
 }
 
+// Programmatic Metal capture to a .gputrace document for Xcode.
+// Requires METAL_CAPTURE_ENABLED=1 in the environment at launch.
+bool msplat_begin_gpu_capture(const char* path) {
+    MTLCaptureManager *mgr = [MTLCaptureManager sharedCaptureManager];
+    if (![mgr supportsDestination:MTLCaptureDestinationGPUTraceDocument]) {
+        fprintf(stderr, "msplat: .gputrace capture unsupported — launch with METAL_CAPTURE_ENABLED=1\n");
+        return false;
+    }
+    MetalContext* ctx = get_global_context();
+    if (!ctx) return false;
+
+    NSString *nsPath = [NSString stringWithUTF8String:path];
+    // startCapture fails outright if the destination already exists.
+    [[NSFileManager defaultManager] removeItemAtPath:nsPath error:nil];
+
+    MTLCaptureDescriptor *desc = [[MTLCaptureDescriptor alloc] init];
+    desc.captureObject = ctx->queue;
+    desc.destination = MTLCaptureDestinationGPUTraceDocument;
+    desc.outputURL = [NSURL fileURLWithPath:nsPath];
+
+    NSError *err = nil;
+    BOOL ok = [mgr startCaptureWithDescriptor:desc error:&err];
+    [desc release];
+    if (!ok) {
+        fprintf(stderr, "msplat: startCapture failed: %s\n",
+                err ? err.localizedDescription.UTF8String : "unknown error");
+        return false;
+    }
+    return true;
+}
+
+void msplat_end_gpu_capture() {
+    [[MTLCaptureManager sharedCaptureManager] stopCapture];
+}
+
 void msplat_enable_gpu_timing(bool enable) {
     g_gpu_timing_enabled = enable;
     g_gpu_timing_checked = true;
@@ -341,6 +374,10 @@ void msplat_drain_stage_times(std::vector<double> stage_times[], int max_stages,
 
 #define RAST_BLOCK_X 8
 #define RAST_BLOCK_Y 8
+
+// Must match MAX_TILE_ELEMS in msplat_metal.metal — scatter_to_prealloc_bins_kernel
+// drops anything past this, so a tile's gaussian range can never exceed it.
+#define MAX_TILE_ELEMS 2048
 
 // Cached buffer pool — all intermediate GPU buffers are reused across iterations.
 // Sizes only change at densification (every 100 steps); between densifications
@@ -367,11 +404,12 @@ struct FusedTensorCache {
 
     // Intersection overflow detection
     MTensor overflow_flag;
-    int64_t capacity_multiplier = 16;
 
     // Depth-chunked rasterization buffers
-    uint32_t current_K_max = 1;
     int chunk_K_max = 0;
+    // Dimensions the chunk buffers are sized for. Distinct from img_height/img_width
+    // because ensure_forward() updates those before ensure_chunks() runs.
+    int chunk_h = 0, chunk_w = 0;
     MTensor chunk_T, chunk_C, chunk_final_idx;
     MTensor prefix_T, after_C;
 
@@ -414,7 +452,7 @@ struct FusedTensorCache {
             tile_bins = mtensor_empty(dev, {nt, 2}, DType::Int32);
             tile_offsets = mtensor_empty(dev, {nt}, DType::Int32);
             tile_scatter_counters = mtensor_empty(dev, {nt}, DType::Int32);
-            prealloc_bins = mtensor_empty(dev, {(int64_t)nt * 2048}, DType::Int64);
+            prealloc_bins = mtensor_empty(dev, {(int64_t)nt * MAX_TILE_ELEMS}, DType::Int64);
         }
         if (!loss_sum.defined()) {
             loss_sum = mtensor_empty(dev, {1}, DType::Float32);
@@ -425,8 +463,9 @@ struct FusedTensorCache {
     }
 
     void ensure_chunks(int K, int ih, int iw, id<MTLDevice> dev) {
-        if (K <= chunk_K_max && ih == img_height && iw == img_width) return;
+        if (K <= chunk_K_max && ih == chunk_h && iw == chunk_w) return;
         chunk_K_max = K;
+        chunk_h = ih; chunk_w = iw;
         chunk_T = mtensor_empty(dev, {K, ih, iw}, DType::Float32);
         chunk_C = mtensor_empty(dev, {K, ih, iw, 3}, DType::Float32);
         chunk_final_idx = mtensor_empty(dev, {K, ih, iw}, DType::Int32);
@@ -442,7 +481,7 @@ struct FusedTensorCache {
             v_conic = mtensor_empty(dev, {np, 3}, DType::Float32);
             v_colors_rast = mtensor_empty(dev, {np, 3}, DType::Float32);
             v_opacity = mtensor_empty(dev, {np, 1}, DType::Float32);
-            v_depth = mtensor_empty(dev, {np}, DType::Float32);
+            v_depth = mtensor_zeros(dev, {np}, DType::Float32);  // never written; read as 0
             v_mean3d = mtensor_empty(dev, {np, 3}, DType::Float32);
             v_scale = mtensor_empty(dev, {np, 3}, DType::Float32);
             v_quat = mtensor_empty(dev, {np, 4}, DType::Float32);
@@ -492,7 +531,11 @@ static void forward_pipeline(
             overflow_warned = true;
         }
     }
-    int64_t capacity = (int64_t)num_points * g_tcache.capacity_multiplier;
+    // scatter_to_prealloc_bins clamps every tile counter to MAX_TILE_ELEMS, so the
+    // prefix sum over them cannot exceed num_tiles * MAX_TILE_ELEMS. This is the only
+    // hard bound available: a gaussian's tile footprint is unclamped, so no multiple
+    // of num_points bounds the total.
+    int64_t capacity = (int64_t)num_tiles * MAX_TILE_ELEMS;
     uint32_t channels = 3;
 
     // --- Cached buffer pool: only reallocate on dimension change (densification) ---
@@ -526,8 +569,6 @@ static void forward_pipeline(
     });
     auto cam_pos_arr = std::make_shared<std::array<float, 3>>(std::array<float, 3>{cam_pos[0], cam_pos[1], cam_pos[2]});
     uint32_t num_points_u32 = (uint32_t)num_points;
-    uint32_t capacity_u32 = (uint32_t)capacity;
-    uint32_t prefix_N = (uint32_t)num_points;
     auto img_size_dim3 = std::make_shared<std::array<uint32_t, 4>>(std::array<uint32_t, 4>{img_width, img_height, 1, 0xDEAD});
     auto block_size_dim2 = std::make_shared<std::array<int32_t, 2>>(std::array<int32_t, 2>{RAST_BLOCK_X, RAST_BLOCK_Y});
 
@@ -537,7 +578,7 @@ static void forward_pipeline(
     if (std::getenv("BENCHMARK") && (diag_count == 100 || diag_count == 500 || diag_count == 1500)) {
             fprintf(stderr, "\n=== Roofline Dimensions (iter %d) ===\n", diag_count);
             fprintf(stderr, "  num_points:     %d\n", num_points);
-            fprintf(stderr, "  capacity:       %lld (= num_points * %lld)\n", (long long)capacity, (long long)g_tcache.capacity_multiplier);
+            fprintf(stderr, "  capacity:       %lld (= num_tiles * %d)\n", (long long)capacity, MAX_TILE_ELEMS);
             fprintf(stderr, "  img:            %u x %u = %u pixels\n", img_width, img_height, img_width * img_height);
             fprintf(stderr, "  tiles:          %d x %d = %d\n", tile_bounds_x, tile_bounds_y, num_tiles);
             fprintf(stderr, "  SH degree:      %u (bases: %u)\n", degree, (degree + 1) * (degree + 1));
@@ -697,8 +738,6 @@ static void forward_pipeline(
     // Compute K_max conservatively from CPU-side data (no GPU sync needed).
     // avg_per_tile = capacity / num_tiles. Use 6x average to cover heavy-tailed
     // tile distributions. Overestimate is cheap: empty chunks early-exit immediately.
-    // If the densest tile exceeds K_max * CHUNK_SIZE, those gaussians are silently
-    // skipped — but 6x covers typical skew (measured max/avg ratio: ~1.5-2.5x).
     if (num_tiles >= 400) {
         // High-res: enough tiles for good GPU occupancy, skip chunking
         K_max = 1;
@@ -707,10 +746,11 @@ static void forward_pipeline(
         uint32_t conservative_max = avg_per_tile * 6;  // 6x average — covers heavy-tailed distributions
         K_max = (conservative_max + CHUNK_SIZE - 1) / CHUNK_SIZE;
         if (K_max < 2) K_max = 2;
-        uint32_t abs_max = (uint32_t)((capacity + CHUNK_SIZE - 1) / CHUNK_SIZE);
+        // A tile's range is capped at MAX_TILE_ELEMS by the scatter kernel, so any
+        // chunk beyond this is always empty.
+        uint32_t abs_max = (MAX_TILE_ELEMS + CHUNK_SIZE - 1) / CHUNK_SIZE;
         if (K_max > abs_max) K_max = abs_max;
     }
-    g_tcache.current_K_max = K_max;
     if (K_max > 1) {
         g_tcache.ensure_chunks(K_max, img_height, img_width, ctx->device);
     }
@@ -807,8 +847,37 @@ std::tuple<MTensor, float> msplat_train_step(
             overflow_warned = true;
         }
     }
-    int64_t capacity = (int64_t)num_points * g_tcache.capacity_multiplier;
+    // scatter_to_prealloc_bins clamps every tile counter to MAX_TILE_ELEMS, so the
+    // prefix sum over them cannot exceed num_tiles * MAX_TILE_ELEMS. This is the only
+    // hard bound available: a gaussian's tile footprint is unclamped, so no multiple
+    // of num_points bounds the total.
+    int64_t capacity = (int64_t)num_tiles * MAX_TILE_ELEMS;
     uint32_t channels = 3;
+
+    // Periodic diagnostic on the PREVIOUS iteration's counters — must run before
+    // ensure_forward/ensure_backward, which reallocate (uninitialized) whenever the
+    // gaussian count or resolution changes.
+    static int diag_it = 0;
+    diag_it++;
+    if ((diag_it == 200 || diag_it == 1000 || diag_it == 2500 || diag_it == 4500 || diag_it == 6500)
+        && g_tcache.tile_scatter_counters.defined() && g_tcache.fwd_num_points > 0
+        && std::getenv("BENCHMARK")) {
+        ctx->syncCB();  // diagnostic-only: makes the previous iteration's counters readable
+        const int32_t *counts = g_tcache.tile_scatter_counters.data<int32_t>();
+        int nt_prev = (int)g_tcache.tile_scatter_counters.numel();
+        int64_t total = 0; int32_t maxc = 0;
+        for (int t = 0; t < nt_prev; t++) { total += counts[t]; maxc = std::max(maxc, counts[t]); }
+        const int32_t *rad = g_tcache.radii_out.data<int32_t>();
+        int np_prev = g_tcache.fwd_num_points;
+        int64_t vis = 0;
+        for (int p = 0; p < np_prev; p++) if (rad[p] > 0) vis++;
+        fprintf(stderr, "[diag it=%d] %dx%d  N=%d  visible=%lld (%.1f%%)  intersections=%lld"
+                "  per-vis-gaussian=%.2f  per-tile avg=%.0f max=%d\n",
+                diag_it, g_tcache.img_width, g_tcache.img_height, np_prev, (long long)vis,
+                100.0 * vis / std::max(1, np_prev), (long long)total,
+                (double)total / std::max((int64_t)1, vis),
+                (double)total / std::max(1, nt_prev), maxc);
+    }
 
     // --- Cached buffer pool ---
     g_tcache.ensure_forward(num_points, capacity, img_height, img_width, num_tiles, ctx->device);
@@ -858,8 +927,6 @@ std::tuple<MTensor, float> msplat_train_step(
     });
     auto cam_pos_arr = std::make_shared<std::array<float, 3>>(std::array<float, 3>{cam_pos[0], cam_pos[1], cam_pos[2]});
     uint32_t num_points_u32 = (uint32_t)num_points;
-    uint32_t capacity_u32 = (uint32_t)capacity;
-    uint32_t prefix_N = (uint32_t)num_points;
     auto img_size_dim3 = std::make_shared<std::array<uint32_t, 4>>(std::array<uint32_t, 4>{img_width, img_height, 1, 0xDEAD});
     auto block_size_dim2 = std::make_shared<std::array<int32_t, 2>>(std::array<int32_t, 2>{RAST_BLOCK_X, RAST_BLOCK_Y});
     // tile_bounds for rasterize kernels must be 16x16 tile counts (tile_bins granularity)
@@ -880,10 +947,9 @@ std::tuple<MTensor, float> msplat_train_step(
         uint32_t conservative_max = avg_per_tile * 6;
         K_max = (conservative_max + CHUNK_SIZE - 1) / CHUNK_SIZE;
         if (K_max < 2) K_max = 2;
-        uint32_t abs_max = (uint32_t)((capacity + CHUNK_SIZE - 1) / CHUNK_SIZE);
+        uint32_t abs_max = (MAX_TILE_ELEMS + CHUNK_SIZE - 1) / CHUNK_SIZE;
         if (K_max > abs_max) K_max = abs_max;
     }
-    g_tcache.current_K_max = K_max;
     if (K_max > 1) {
         g_tcache.ensure_chunks(K_max, img_height, img_width, ctx->device);
     }
@@ -1165,7 +1231,6 @@ std::tuple<MTensor, float> msplat_train_step(
         [blit fillBuffer:v_conic.buffer() range:NSMakeRange(0, v_conic.nbytes()) value:0];
         [blit fillBuffer:v_colors_rast.buffer() range:NSMakeRange(0, v_colors_rast.nbytes()) value:0];
         [blit fillBuffer:v_opacity.buffer() range:NSMakeRange(0, v_opacity.nbytes()) value:0];
-        [blit fillBuffer:v_depth.buffer() range:NSMakeRange(0, v_depth.nbytes()) value:0];
         [blit fillBuffer:v_mean3d.buffer() range:NSMakeRange(0, v_mean3d.nbytes()) value:0];
         [blit fillBuffer:v_scale.buffer() range:NSMakeRange(0, v_scale.nbytes()) value:0];
         [blit fillBuffer:v_quat.buffer() range:NSMakeRange(0, v_quat.nbytes()) value:0];
