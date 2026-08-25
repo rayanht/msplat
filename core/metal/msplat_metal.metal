@@ -3793,6 +3793,98 @@ kernel void compact_scatter_kernel(
     dst[dst_elem * stride + sub] = src[elem * stride + sub];
 }
 
+// ===== Morton reorder =====
+// Gaussian index order is whatever densification's compaction produced, so the
+// stages that index by gaussian id (projection, grad stats, Adam, tile scatter)
+// touch unrelated addresses from neighbouring lanes and mix visible with culled
+// inside a simdgroup. Sorting by Morton code of position makes all of those
+// coherent. Reordering permutes an unordered set, so the scene is unchanged.
+
+#define MORTON_AXIS_BITS 6
+#define MORTON_BUCKETS (1u << (3 * MORTON_AXIS_BITS))
+
+inline uint morton_spread6(uint v) {
+    v &= 0x3fu;
+    v = (v | (v << 8)) & 0x0300Fu;
+    v = (v | (v << 4)) & 0x030C3u;
+    v = (v | (v << 2)) & 0x09249u;
+    return v;
+}
+
+kernel void morton_bucket_kernel(
+    constant uint& N                 [[buffer(0)]],
+    constant float* means            [[buffer(1)]],
+    constant float3& origin          [[buffer(2)]],
+    constant float3& inv_extent      [[buffer(3)]],
+    device int* bucket_out           [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= N) return;
+    const float3 p = read_packed_float3(means, idx);
+    const float3 t = saturate((p - origin) * inv_extent);
+    const uint m = (1u << MORTON_AXIS_BITS) - 1u;
+    const uint cx = min((uint)(t.x * (float)(1u << MORTON_AXIS_BITS)), m);
+    const uint cy = min((uint)(t.y * (float)(1u << MORTON_AXIS_BITS)), m);
+    const uint cz = min((uint)(t.z * (float)(1u << MORTON_AXIS_BITS)), m);
+    bucket_out[idx] = (int)(morton_spread6(cx) | (morton_spread6(cy) << 1) |
+                            (morton_spread6(cz) << 2));
+}
+
+kernel void morton_histogram_kernel(
+    constant uint& N                 [[buffer(0)]],
+    constant int* bucket             [[buffer(1)]],
+    device atomic_uint* counts       [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= N) return;
+    atomic_fetch_add_explicit(&counts[bucket[idx]], 1u, memory_order_relaxed);
+}
+
+// perm[dst] = src index, ordered by bucket. `starts` is the exclusive offset of
+// each bucket, `claim` a zeroed per-bucket cursor.
+kernel void morton_scatter_kernel(
+    constant uint& N                 [[buffer(0)]],
+    constant int* bucket             [[buffer(1)]],
+    constant int* inclusive          [[buffer(2)]],
+    constant int* counts             [[buffer(3)]],
+    device atomic_uint* claim        [[buffer(4)]],
+    device int* perm                 [[buffer(5)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= N) return;
+    const int b = bucket[idx];
+    const int start = inclusive[b] - counts[b];
+    const uint slot = atomic_fetch_add_explicit(&claim[b], 1u, memory_order_relaxed);
+    perm[start + (int)slot] = (int)idx;
+}
+
+kernel void permute_gather_kernel(
+    constant float* src              [[buffer(0)]],
+    device float* dst                [[buffer(1)]],
+    constant int* perm               [[buffer(2)]],
+    constant uint& N                 [[buffer(3)]],
+    constant uint& stride            [[buffer(4)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    const uint elem = tid / stride;
+    const uint sub  = tid % stride;
+    if (elem >= N) return;
+    dst[elem * stride + sub] = src[(uint)perm[elem] * stride + sub];
+}
+
+kernel void permute_copy_back_kernel(
+    constant float* src              [[buffer(0)]],
+    device float* dst                [[buffer(1)]],
+    constant uint& N                 [[buffer(2)]],
+    constant uint& stride            [[buffer(3)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    const uint elem = tid / stride;
+    const uint sub  = tid % stride;
+    if (elem >= N) return;
+    dst[elem * stride + sub] = src[elem * stride + sub];
+}
+
 // Copy compacted data from scratch back to original buffer.
 // Reads new_count from keep_prefix to determine bounds.
 kernel void compact_copy_back_kernel(

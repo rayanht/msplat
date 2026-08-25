@@ -158,6 +158,12 @@ struct MetalContext {
     id<MTLComputePipelineState> densify_cull_classify_kernel_cpso;
     id<MTLComputePipelineState> compact_scatter_kernel_cpso;
     id<MTLComputePipelineState> compact_copy_back_kernel_cpso;
+    // Morton reorder
+    id<MTLComputePipelineState> morton_bucket_kernel_cpso;
+    id<MTLComputePipelineState> morton_histogram_kernel_cpso;
+    id<MTLComputePipelineState> morton_scatter_kernel_cpso;
+    id<MTLComputePipelineState> permute_gather_kernel_cpso;
+    id<MTLComputePipelineState> permute_copy_back_kernel_cpso;
 };
 
 // Explicit metallib path (set by Swift/Python wrappers before first use)
@@ -261,6 +267,12 @@ MetalContext* init_msplat_metal_context() {
     ctx->densify_cull_classify_kernel_cpso        = load(@"densify_cull_classify_kernel");
     ctx->compact_scatter_kernel_cpso              = load(@"compact_scatter_kernel");
     ctx->compact_copy_back_kernel_cpso            = load(@"compact_copy_back_kernel");
+    // Morton reorder
+    ctx->morton_bucket_kernel_cpso                = load(@"morton_bucket_kernel");
+    ctx->morton_histogram_kernel_cpso             = load(@"morton_histogram_kernel");
+    ctx->morton_scatter_kernel_cpso               = load(@"morton_scatter_kernel");
+    ctx->permute_gather_kernel_cpso               = load(@"permute_gather_kernel");
+    ctx->permute_copy_back_kernel_cpso            = load(@"permute_copy_back_kernel");
 
     [metal_library release];
 
@@ -1654,4 +1666,115 @@ int msplat_densify(
     ctx->syncCB();
     int new_count = keep_prefix.data<int32_t>()[worst_case - 1];
     return new_count;
+}
+
+// ============================================================================
+// Morton reorder — counting sort of the gaussian arrays by Morton code of
+// position, so the per-gaussian stages address memory coherently and a
+// simdgroup's lanes are uniformly visible or uniformly culled.
+// ============================================================================
+void msplat_morton_reorder(
+    int N, const float origin[3], const float inv_extent[3],
+    MTensor &means_buf, MTensor &scales_buf, MTensor &quats_buf,
+    MTensor &featuresDc_buf, MTensor &featuresRest_buf, MTensor &opacities_buf,
+    int fr_stride,
+    MTensor adam_exp_avg_buf[], MTensor adam_exp_avg_sq_buf[],
+    MTensor &bucket, MTensor &perm, MTensor &counts, MTensor &inclusive,
+    MTensor &claim, MTensor &block_totals, MTensor &scratch
+) {
+    MetalContext* ctx = get_global_context();
+    if (N <= 1) return;
+
+    std::array<MTensor*, 18> all_bufs = {{
+        &means_buf, &scales_buf, &quats_buf, &featuresDc_buf, &featuresRest_buf, &opacities_buf,
+        &adam_exp_avg_buf[0], &adam_exp_avg_buf[1], &adam_exp_avg_buf[2],
+        &adam_exp_avg_buf[3], &adam_exp_avg_buf[4], &adam_exp_avg_buf[5],
+        &adam_exp_avg_sq_buf[0], &adam_exp_avg_sq_buf[1], &adam_exp_avg_sq_buf[2],
+        &adam_exp_avg_sq_buf[3], &adam_exp_avg_sq_buf[4], &adam_exp_avg_sq_buf[5]
+    }};
+    std::array<int, 18> all_strides = {{
+        3, 3, 4, 3, fr_stride, 1,
+        3, 3, 4, 3, fr_stride, 1,
+        3, 3, 4, 3, fr_stride, 1
+    }};
+
+    const uint32_t N_u32 = (uint32_t)N;
+    const uint32_t NBUCKETS = 1u << (3 * 6);  // must match MORTON_BUCKETS
+    auto origin3 = std::make_shared<std::array<float, 3>>(
+        std::array<float, 3>{origin[0], origin[1], origin[2]});
+    auto inv_ext3 = std::make_shared<std::array<float, 3>>(
+        std::array<float, 3>{inv_extent[0], inv_extent[1], inv_extent[2]});
+
+    id<MTLCommandBuffer> command_buffer = ctx->getCommandBuffer();
+    dispatch_sync(ctx->d_queue, ^(){
+        id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+        [blit fillBuffer:counts.buffer() range:NSMakeRange(0, NBUCKETS * sizeof(int)) value:0];
+        [blit fillBuffer:claim.buffer() range:NSMakeRange(0, NBUCKETS * sizeof(int)) value:0];
+        [blit endEncoding];
+
+        id<MTLComputeCommandEncoder> enc = [command_buffer computeCommandEncoder];
+
+        {
+            NSUInteger tpg = MIN(ctx->morton_bucket_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)N);
+            [enc setComputePipelineState:ctx->morton_bucket_kernel_cpso];
+            ENC_SCALAR(enc, N_u32, 0);
+            ENC_BUF(enc, means_buf, 1);
+            [enc setBytes:origin3->data() length:sizeof(float) * 3 atIndex:2];
+            [enc setBytes:inv_ext3->data() length:sizeof(float) * 3 atIndex:3];
+            ENC_BUF(enc, bucket, 4);
+            [enc dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        }
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        {
+            NSUInteger tpg = MIN(ctx->morton_histogram_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)N);
+            [enc setComputePipelineState:ctx->morton_histogram_kernel_cpso];
+            ENC_SCALAR(enc, N_u32, 0); ENC_BUF(enc, bucket, 1); ENC_BUF(enc, counts, 2);
+            [enc dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        }
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        {
+            uint32_t K = (NBUCKETS + 1023) / 1024;
+            [enc setComputePipelineState:ctx->block_reduce_kernel_cpso];
+            ENC_SCALAR(enc, NBUCKETS, 0); ENC_BUF(enc, counts, 1); ENC_BUF(enc, block_totals, 2);
+            [enc dispatchThreadgroups:MTLSizeMake(K, 1, 1) threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            [enc setComputePipelineState:ctx->block_scan_propagate_kernel_cpso];
+            ENC_SCALAR(enc, NBUCKETS, 0); ENC_BUF(enc, counts, 1);
+            ENC_BUF(enc, inclusive, 2); ENC_BUF(enc, block_totals, 3);
+            [enc dispatchThreadgroups:MTLSizeMake(K, 1, 1) threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+        }
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        {
+            NSUInteger tpg = MIN(ctx->morton_scatter_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)N);
+            [enc setComputePipelineState:ctx->morton_scatter_kernel_cpso];
+            ENC_SCALAR(enc, N_u32, 0); ENC_BUF(enc, bucket, 1); ENC_BUF(enc, inclusive, 2);
+            ENC_BUF(enc, counts, 3); ENC_BUF(enc, claim, 4); ENC_BUF(enc, perm, 5);
+            [enc dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+        }
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+        for (int b = 0; b < 18; b++) {
+            uint32_t stride_u32 = (uint32_t)all_strides[b];
+            uint32_t total_threads = N_u32 * stride_u32;
+            NSUInteger tpg = MIN(ctx->permute_gather_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)total_threads);
+
+            [enc setComputePipelineState:ctx->permute_gather_kernel_cpso];
+            [enc setBuffer:all_bufs[b]->buffer() offset:0 atIndex:0];
+            ENC_BUF(enc, scratch, 1); ENC_BUF(enc, perm, 2);
+            ENC_SCALAR(enc, N_u32, 3); ENC_SCALAR(enc, stride_u32, 4);
+            [enc dispatchThreads:MTLSizeMake(total_threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+            [enc setComputePipelineState:ctx->permute_copy_back_kernel_cpso];
+            ENC_BUF(enc, scratch, 0);
+            [enc setBuffer:all_bufs[b]->buffer() offset:0 atIndex:1];
+            ENC_SCALAR(enc, N_u32, 2); ENC_SCALAR(enc, stride_u32, 3);
+            [enc dispatchThreads:MTLSizeMake(total_threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        }
+
+        [enc endEncoding];
+    });
 }

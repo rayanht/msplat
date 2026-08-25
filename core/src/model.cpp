@@ -159,8 +159,45 @@ void Model::setupOptimizers(){
     int64_t fr_stride = featuresRest.numel() / featuresRest.size(0);
     densify_compact_scratch = gpu_zeros({(int64_t)buf_capacity * fr_stride}, DType::Float32);
     densify_random_samples = gpu_zeros({buf_capacity, 3}, DType::Float32);
+    allocMortonBuffers();
 
     refreshViews();
+}
+
+void Model::allocMortonBuffers(){
+    constexpr int64_t NBUCKETS = 1 << (3 * 6);  // must match MORTON_BUCKETS
+    morton_bucket = gpu_zeros({buf_capacity}, DType::Int32);
+    morton_perm = gpu_zeros({buf_capacity}, DType::Int32);
+    morton_counts = gpu_zeros({NBUCKETS}, DType::Int32);
+    morton_inclusive = gpu_zeros({NBUCKETS}, DType::Int32);
+    morton_claim = gpu_zeros({NBUCKETS}, DType::Int32);
+}
+
+// Sort the gaussian arrays by Morton code of position. Index order is otherwise
+// whatever densification produced, which leaves the per-gaussian stages reading
+// unrelated addresses from neighbouring lanes.
+void Model::mortonReorder(){
+    if (num_active <= 1) return;
+    msplat_gpu_sync();  // bounds are read on the CPU
+
+    const float *m = means.data<float>();
+    float lo[3] = {m[0], m[1], m[2]}, hi[3] = {m[0], m[1], m[2]};
+    for (int i = 1; i < num_active; i++)
+        for (int c = 0; c < 3; c++) {
+            lo[c] = std::min(lo[c], m[i*3+c]);
+            hi[c] = std::max(hi[c], m[i*3+c]);
+        }
+    float inv[3];
+    for (int c = 0; c < 3; c++) inv[c] = 1.0f / std::max(hi[c] - lo[c], 1e-9f);
+
+    msplat_morton_reorder(
+        num_active, lo, inv,
+        means_buf, scales_buf, quats_buf,
+        featuresDc_buf, featuresRest_buf, opacities_buf,
+        (int)featuresRest_buf.stride0(),
+        adam_exp_avg_buf, adam_exp_avg_sq_buf,
+        morton_bucket, morton_perm, morton_counts, morton_inclusive,
+        morton_claim, densify_block_totals, densify_compact_scratch);
 }
 
 void Model::releaseOptimizers(){
@@ -223,6 +260,7 @@ void Model::ensureCapacity(int needed){
     int64_t fr_stride = featuresRest_buf.stride0();
     densify_compact_scratch = gpu_zeros({(int64_t)new_cap * fr_stride}, DType::Float32);
     densify_random_samples = gpu_zeros({new_cap, 3}, DType::Float32);
+    allocMortonBuffers();
 
     buf_capacity = new_cap;
     refreshViews();
@@ -274,6 +312,7 @@ void Model::afterTrain(int step){
 
             num_active = new_count;
             refreshViews();
+            mortonReorder();
             std::cout << "Densified: " << numPointsBefore << " -> " << num_active << " gaussians" << std::endl;
         }
 
@@ -478,6 +517,7 @@ int Model::loadCheckpoint(const std::string &filename) {
     int64_t fr_stride = featuresRest.numel() / featuresRest.size(0);
     densify_compact_scratch = gpu_zeros({(int64_t)buf_capacity * fr_stride}, DType::Float32);
     densify_random_samples = gpu_zeros({buf_capacity, 3}, DType::Float32);
+    allocMortonBuffers();
 
     refreshViews();
 
