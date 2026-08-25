@@ -24,6 +24,12 @@ void msplat_commit();
 // Synchronize (commit + wait for completion)
 void msplat_gpu_sync();
 
+// Capture GPU work to a .gputrace document for Xcode. Needs METAL_CAPTURE_ENABLED=1
+// in the environment at launch. Bracket whole iterations and sync on both edges —
+// commitAndContinue means a command buffer would otherwise straddle the boundary.
+bool msplat_begin_gpu_capture(const char* path);
+void msplat_end_gpu_capture();
+
 // GPU timing — non-invasive, uses completion handlers on committed CBs
 void msplat_enable_gpu_timing(bool enable);
 // Drains accumulated GPU times (ms per CB) into the provided vector. Thread-safe.

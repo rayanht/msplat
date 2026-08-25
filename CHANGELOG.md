@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.1.4 — Depth-chunk bounds
+
+- **`K_max` bounded by the per-tile cap.** The number of 512-gaussian depth chunks
+  a tile is split into was derived from `capacity` (`num_points * 16`), a buffer
+  size rather than an intersection count. `scatter_to_prealloc_bins` clamps every
+  tile to `MAX_TILE_ELEMS`, so 4 chunks cover any tile; it was dispatching ~190.
+  **garden 7K at the default 2 downscales: 44s → 36s.** Full-resolution runs never
+  chunk, so `--num-downscales 0` is unchanged.
+- **Chunk buffers resize on a resolution change.** `ensure_chunks` compared against
+  `img_height`/`img_width`, which `ensure_forward` had already updated, so the guard
+  never fired and the buffers kept the previous resolution's size. Reachable
+  whenever chunking is active at more than one resolution.
+- **Packed buffers sized by a provable bound.** `num_tiles * MAX_TILE_ELEMS`
+  replaces `num_points * 16`, which bounded nothing — a gaussian's tile footprint
+  is unclamped, so the sort could write past the end of the packed buffers.
+- **Transmittance recovered for capped gaussians.** The backward rasterizers skipped
+  `T *= 1/(1-alpha)` when `alpha` hit the 0.999 cap, leaving T too small for every
+  nearer gaussian on that pixel. The cap now zeroes only the sigma-routed gradients
+  (`v_conic`, `v_xy`, `v_opacity`), which are genuinely zero there.
+- **Per-stage GPU profiling reported real times.** `PROFILE_STAGES` applied the mach
+  timebase to counter timestamps that are already nanoseconds, scaling every stage
+  by 41.67x.
+- Metal shaders compile with `-frecord-sources -gline-tables-only`, so a `.gputrace`
+  carries shader source and per-line cost in Xcode. Neither flag changes codegen.
+- `msplat_begin_gpu_capture` / `msplat_end_gpu_capture` write a `.gputrace`
+  document; the CLI exposes them via `MSPLAT_GPUTRACE`, `MSPLAT_GPUTRACE_STEP`
+  and `MSPLAT_GPUTRACE_ITERS`. Requires `METAL_CAPTURE_ENABLED=1`.
+- `BENCHMARK=1` reports per-resolution-phase timings, refine/densify share, and
+  intersection counts against the per-tile cap.
+
 ## v1.1.3 — Fused kernels + pre-allocated tile bins
 
 - **Fused SH backward into Adam optimizer** — spherical harmonics gradients are now

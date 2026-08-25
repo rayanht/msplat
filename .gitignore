@@ -45,3 +45,6 @@ cameras.json
 
 # Demo
 demo/.build/
+
+# GPU traces
+*.gputrace
