@@ -484,7 +484,9 @@ kernel void nd_rasterize_forward_kernel(
     constant uint2& blockDim,
     uint2 blockIdx [[threadgroup_position_in_grid]],
     uint2 threadIdx [[thread_position_in_threadgroup]],
-    uint tr [[thread_index_in_threadgroup]]
+    uint tr [[thread_index_in_threadgroup]],
+    uint warp_size [[threads_per_simdgroup]],
+    uint wr [[thread_index_in_simdgroup]]
 ) {
     // Threadgroup-batched forward rasterization: all threads in a tile
     // cooperatively load Gaussian data into shared memory, then read from it.
@@ -502,10 +504,20 @@ kernel void nd_rasterize_forward_kernel(
     int2 range = read_packed_int2(tile_bins, tile_id);
     const int num_batches = (range.y - range.x + RAST_BLOCK_SIZE - 1) / RAST_BLOCK_SIZE;
 
-    // threadgroup shared memory for batch loading
+    // threadgroup shared memory holding only the gaussians that can reach this block
     threadgroup float3 xy_opacity_batch[RAST_BLOCK_SIZE];
     threadgroup float3 conic_batch[RAST_BLOCK_SIZE];
     threadgroup float3 rgbs_batch[RAST_BLOCK_SIZE];
+    threadgroup int    gidx_batch[RAST_BLOCK_SIZE];
+    constexpr uint NUM_WARPS = RAST_BLOCK_SIZE / 32;
+    threadgroup uint warp_counts[NUM_WARPS];
+
+    // tile_bins is at BLOCK_X/Y granularity but a threadgroup covers RAST_BLOCK_X/Y,
+    // so a tile's list is mostly gaussians that miss this block entirely.
+    const float box_hx = 0.5f * (float)(blockDim.x - 1);
+    const float box_hy = 0.5f * (float)(blockDim.y - 1);
+    const float box_cx = (float)(blockIdx.x * blockDim.x) + box_hx;
+    const float box_cy = (float)(blockIdx.y * blockDim.y) + box_hy;
 
     float T = 1.f;
     float3 pix_out = {0.f, 0.f, 0.f};
@@ -513,29 +525,62 @@ kernel void nd_rasterize_forward_kernel(
     bool done = false;
 
     for (int b = 0; b < num_batches; ++b) {
-        // sync before loading next batch
+        // sync before overwriting the batch buffers
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // each thread loads one gaussian into shared memory
+        // each thread loads one gaussian and decides whether it can reach this block
         int batch_start = range.x + RAST_BLOCK_SIZE * b;
-        int idx = batch_start + tr;
+        int idx = batch_start + (int)tr;
+        float3 l_xyo = 0.f, l_con = 0.f, l_rgb = 0.f;
+        bool keep = false;
         if (idx < range.y) {
             // Sequential reads from packed sorted-order buffers
-            xy_opacity_batch[tr] = read_packed_float3(packed_xy_opac, idx);
-            conic_batch[tr] = read_packed_float3(packed_conic, idx);
+            l_xyo = read_packed_float3(packed_xy_opac, idx);
+            l_con = read_packed_float3(packed_conic, idx);
             // packed_rgb has raw SH output — clamp_min(raw + 0.5, 0)
-            const float3 raw_c = read_packed_float3(packed_rgb, idx);
-            rgbs_batch[tr] = max(raw_c + 0.5f, 0.0f);
+            l_rgb = max(read_packed_float3(packed_rgb, idx) + 0.5f, 0.0f);
+            // sigma < 5.55 confines the gaussian to an ellipse with axis-aligned
+            // half-extents sqrt(11.1 * cov_ii), cov = inverse(conic). Rejecting on
+            // that box only drops gaussians the per-pixel test below would reject
+            // for every pixel in this block, so the result is unchanged.
+            const float det = fma(l_con.x, l_con.z, -l_con.y * l_con.y);
+            if (det > 0.f) {
+                const float ex = sqrt(11.1f * l_con.z / det);
+                const float ey = sqrt(11.1f * l_con.x / det);
+                keep = fabs(l_xyo.x - box_cx) <= ex + box_hx
+                    && fabs(l_xyo.y - box_cy) <= ey + box_hy;
+            } else {
+                keep = true;  // degenerate conic — let the per-pixel test decide
+            }
+        }
+
+        // Compact survivors, preserving depth order: exclusive prefix sum within each
+        // simdgroup, offset by the counts of the preceding ones.
+        const uint warp_id = tr / warp_size;
+        const uint kp = keep ? 1u : 0u;
+        const uint wpre = simd_prefix_exclusive_sum(kp);
+        const uint wtot = simd_sum(kp);
+        if (wr == 0) warp_counts[warp_id] = wtot;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint base = 0, batch_size = 0;
+        for (uint w = 0; w < NUM_WARPS; ++w) {
+            if (w < warp_id) base += warp_counts[w];
+            batch_size += warp_counts[w];
+        }
+        if (keep) {
+            const uint s = base + wpre;
+            xy_opacity_batch[s] = l_xyo;
+            conic_batch[s] = l_con;
+            rgbs_batch[s] = l_rgb;
+            gidx_batch[s] = idx;
         }
         // wait for all threads to finish loading
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         if (done || !inside) continue;
 
-        int batch_size = min(RAST_BLOCK_SIZE, range.y - batch_start);
-
         // process gaussians in this batch
-        for (int t = 0; t < batch_size; ++t) {
+        for (uint t = 0; t < batch_size; ++t) {
             const float3 conic_local = conic_batch[t];
             const float3 xy_opac = xy_opacity_batch[t];
             const float2 delta = {xy_opac.x - px, xy_opac.y - py};
@@ -559,7 +604,7 @@ kernel void nd_rasterize_forward_kernel(
 
             const float next_T = T * (1.f - alpha);
             if (next_T <= 1e-4f) {
-                last_contributor = batch_start + t - 1;
+                last_contributor = gidx_batch[t] - 1;
                 done = true;
                 break;
             }
@@ -568,7 +613,7 @@ kernel void nd_rasterize_forward_kernel(
             const float3 rgb = rgbs_batch[t];
             pix_out = fma(rgb, vis, pix_out);
             T = next_T;
-            last_contributor = batch_start + t;
+            last_contributor = gidx_batch[t];
         }
     }
 
@@ -948,6 +993,13 @@ kernel void rasterize_backward_kernel(
     threadgroup float3 xy_opacity_batch[RAST_BLOCK_SIZE];
     threadgroup float3 conic_batch[RAST_BLOCK_SIZE];
     threadgroup float3 rgbs_batch[RAST_BLOCK_SIZE];
+    threadgroup int    gidx_batch[RAST_BLOCK_SIZE];
+
+    // This block's pixel box, used to drop gaussians that cannot reach any of it.
+    constexpr float box_hx = 0.5f * (float)(RAST_BLOCK_X - 1);
+    constexpr float box_hy = 0.5f * (float)(RAST_BLOCK_Y - 1);
+    const float box_cx = (float)(blockIdx.x * RAST_BLOCK_X) + box_hx;
+    const float box_cy = (float)(blockIdx.y * RAST_BLOCK_Y) + box_hy;
 
     // df/d_out for this pixel
     const float3 v_out = read_packed_float3(v_output, pix_id);
@@ -964,6 +1016,7 @@ kernel void rasterize_backward_kernel(
     const uint warp_id = tr / warp_size;
     constexpr uint NUM_WARPS = RAST_BLOCK_SIZE / 32;
     threadgroup int warp_max_finals[NUM_WARPS];
+    threadgroup uint warp_counts[NUM_WARPS];
     if (wr == 0) warp_max_finals[warp_id] = warp_bin_final;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     int tile_max_bin_final = warp_max_finals[0];
@@ -981,39 +1034,65 @@ kernel void rasterize_backward_kernel(
         // index of gaussian to load
         // batch end is the index of the last gaussian in the batch
         const int batch_end = range.y - 1 - RAST_BLOCK_SIZE * b;
-        int batch_size = min(RAST_BLOCK_SIZE, batch_end + 1 - range.x);
-        const int idx = batch_end - tr;
+        const int idx = batch_end - (int)tr;
+        float3 l_xyo = 0.f, l_con = 0.f, l_rgb = 0.f;
+        int32_t l_id = 0;
+        bool keep = false;
         if (idx >= range.x) {
-            id_batch[tr] = gaussian_ids_sorted[idx];
+            l_id = gaussian_ids_sorted[idx];
             // Sequential reads from packed sorted-order buffers
-            xy_opacity_batch[tr] = read_packed_float3(packed_xy_opac, idx);
-            conic_batch[tr] = read_packed_float3(packed_conic, idx);
-            rgbs_batch[tr] = read_packed_float3(packed_rgb, idx);
+            l_xyo = read_packed_float3(packed_xy_opac, idx);
+            l_con = read_packed_float3(packed_conic, idx);
+            l_rgb = read_packed_float3(packed_rgb, idx);
+            // Same conservative box test as the forward: drop gaussians that cannot
+            // reach any pixel of this block.
+            const float det = fma(l_con.x, l_con.z, -l_con.y * l_con.y);
+            if (det > 0.f) {
+                const float ex = sqrt(11.1f * l_con.z / det);
+                const float ey = sqrt(11.1f * l_con.x / det);
+                keep = fabs(l_xyo.x - box_cx) <= ex + box_hx
+                    && fabs(l_xyo.y - box_cy) <= ey + box_hy;
+            } else {
+                keep = true;  // degenerate conic — let the per-pixel test decide
+            }
+        }
+
+        // Compact survivors, preserving back-to-front order.
+        const uint kp = keep ? 1u : 0u;
+        const uint wpre = simd_prefix_exclusive_sum(kp);
+        const uint wtot = simd_sum(kp);
+        if (wr == 0) warp_counts[warp_id] = wtot;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint cbase = 0, batch_size = 0;
+        for (uint w = 0; w < NUM_WARPS; ++w) {
+            if (w < warp_id) cbase += warp_counts[w];
+            batch_size += warp_counts[w];
+        }
+        if (keep) {
+            const uint s = cbase + wpre;
+            id_batch[s] = l_id;
+            xy_opacity_batch[s] = l_xyo;
+            conic_batch[s] = l_con;
+            rgbs_batch[s] = l_rgb;
+            gidx_batch[s] = idx;
         }
         // wait for other threads to collect the gaussians in batch
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         // process gaussians in the current batch for this pixel
         // 0 index is the furthest back gaussian in the batch
-        for (int t = max(0,batch_end - warp_bin_final); t < batch_size; ++t) {
-            // Broadcast batch data from lane 0 → all lanes in SIMD group.
-            // All threads read the same index t, so one threadgroup read +
-            // simd_broadcast replaces 32 redundant threadgroup reads.
-            float3 b_conic, b_xy_opac, b_rgb;
-            int32_t b_id;
-            if (wr == 0) {
-                b_conic = conic_batch[t];
-                b_xy_opac = xy_opacity_batch[t];
-                b_rgb = rgbs_batch[t];
-                b_id = id_batch[t];
-            }
-            b_conic = simd_broadcast(b_conic, 0);
-            b_xy_opac = simd_broadcast(b_xy_opac, 0);
-            b_rgb = simd_broadcast(b_rgb, 0);
-            b_id = simd_broadcast(b_id, 0);
+        for (uint t = 0; t < batch_size; ++t) {
+            const int g_idx = gidx_batch[t];
+            if (g_idx > warp_bin_final) continue;  // beyond every pixel in this warp
+            // Every lane reads the same index; threadgroup memory broadcasts that in
+            // hardware, which is cheaper than routing it through simd_broadcast.
+            const float3 b_conic = conic_batch[t];
+            const float3 b_xy_opac = xy_opacity_batch[t];
+            const float3 b_rgb = rgbs_batch[t];
+            const int32_t b_id = id_batch[t];
 
             int valid = inside;
-            if (batch_end - t > bin_final) {
+            if (g_idx > bin_final) {
                 valid = 0;
             }
             float alpha;
@@ -2953,18 +3032,10 @@ kernel void rasterize_backward_chunked_kernel(
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (int t = max(0, batch_end - warp_bin_final); t < batch_size; ++t) {
-            float3 b_conic, b_xy_opac, b_rgb;
-            int32_t b_id;
-            if (wr == 0) {
-                b_conic = conic_batch[t];
-                b_xy_opac = xy_opacity_batch[t];
-                b_rgb = rgbs_batch[t];
-                b_id = id_batch[t];
-            }
-            b_conic = simd_broadcast(b_conic, 0);
-            b_xy_opac = simd_broadcast(b_xy_opac, 0);
-            b_rgb = simd_broadcast(b_rgb, 0);
-            b_id = simd_broadcast(b_id, 0);
+            const float3 b_conic = conic_batch[t];
+            const float3 b_xy_opac = xy_opacity_batch[t];
+            const float3 b_rgb = rgbs_batch[t];
+            const int32_t b_id = id_batch[t];
 
             int valid = inside;
             if (batch_end - t > bin_final) valid = 0;
@@ -3720,6 +3791,98 @@ kernel void compact_scatter_kernel(
     if (elem >= N || keep_flag[elem] == 0) return;
     int dst_elem = keep_prefix[elem] - 1;
     dst[dst_elem * stride + sub] = src[elem * stride + sub];
+}
+
+// ===== Morton reorder =====
+// Gaussian index order is whatever densification's compaction produced, so the
+// stages that index by gaussian id (projection, grad stats, Adam, tile scatter)
+// touch unrelated addresses from neighbouring lanes and mix visible with culled
+// inside a simdgroup. Sorting by Morton code of position makes all of those
+// coherent. Reordering permutes an unordered set, so the scene is unchanged.
+
+#define MORTON_AXIS_BITS 6
+#define MORTON_BUCKETS (1u << (3 * MORTON_AXIS_BITS))
+
+inline uint morton_spread6(uint v) {
+    v &= 0x3fu;
+    v = (v | (v << 8)) & 0x0300Fu;
+    v = (v | (v << 4)) & 0x030C3u;
+    v = (v | (v << 2)) & 0x09249u;
+    return v;
+}
+
+kernel void morton_bucket_kernel(
+    constant uint& N                 [[buffer(0)]],
+    constant float* means            [[buffer(1)]],
+    constant float3& origin          [[buffer(2)]],
+    constant float3& inv_extent      [[buffer(3)]],
+    device int* bucket_out           [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= N) return;
+    const float3 p = read_packed_float3(means, idx);
+    const float3 t = saturate((p - origin) * inv_extent);
+    const uint m = (1u << MORTON_AXIS_BITS) - 1u;
+    const uint cx = min((uint)(t.x * (float)(1u << MORTON_AXIS_BITS)), m);
+    const uint cy = min((uint)(t.y * (float)(1u << MORTON_AXIS_BITS)), m);
+    const uint cz = min((uint)(t.z * (float)(1u << MORTON_AXIS_BITS)), m);
+    bucket_out[idx] = (int)(morton_spread6(cx) | (morton_spread6(cy) << 1) |
+                            (morton_spread6(cz) << 2));
+}
+
+kernel void morton_histogram_kernel(
+    constant uint& N                 [[buffer(0)]],
+    constant int* bucket             [[buffer(1)]],
+    device atomic_uint* counts       [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= N) return;
+    atomic_fetch_add_explicit(&counts[bucket[idx]], 1u, memory_order_relaxed);
+}
+
+// perm[dst] = src index, ordered by bucket. `starts` is the exclusive offset of
+// each bucket, `claim` a zeroed per-bucket cursor.
+kernel void morton_scatter_kernel(
+    constant uint& N                 [[buffer(0)]],
+    constant int* bucket             [[buffer(1)]],
+    constant int* inclusive          [[buffer(2)]],
+    constant int* counts             [[buffer(3)]],
+    device atomic_uint* claim        [[buffer(4)]],
+    device int* perm                 [[buffer(5)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= N) return;
+    const int b = bucket[idx];
+    const int start = inclusive[b] - counts[b];
+    const uint slot = atomic_fetch_add_explicit(&claim[b], 1u, memory_order_relaxed);
+    perm[start + (int)slot] = (int)idx;
+}
+
+kernel void permute_gather_kernel(
+    constant float* src              [[buffer(0)]],
+    device float* dst                [[buffer(1)]],
+    constant int* perm               [[buffer(2)]],
+    constant uint& N                 [[buffer(3)]],
+    constant uint& stride            [[buffer(4)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    const uint elem = tid / stride;
+    const uint sub  = tid % stride;
+    if (elem >= N) return;
+    dst[elem * stride + sub] = src[(uint)perm[elem] * stride + sub];
+}
+
+kernel void permute_copy_back_kernel(
+    constant float* src              [[buffer(0)]],
+    device float* dst                [[buffer(1)]],
+    constant uint& N                 [[buffer(2)]],
+    constant uint& stride            [[buffer(3)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    const uint elem = tid / stride;
+    const uint sub  = tid % stride;
+    if (elem >= N) return;
+    dst[elem * stride + sub] = src[elem * stride + sub];
 }
 
 // Copy compacted data from scratch back to original buffer.

@@ -19,6 +19,8 @@ struct Model{
   ~Model(){ releaseOptimizers(); }
 
   void setupOptimizers();
+  void allocMortonBuffers();
+  void mortonReorder();
   void releaseOptimizers();
 
   void schedulersStep(int step);
@@ -66,6 +68,7 @@ struct Model{
   MTensor densify_keep_flag, densify_keep_prefix;
   MTensor densify_block_totals;
   MTensor densify_compact_scratch;
+  MTensor morton_bucket, morton_perm, morton_counts, morton_inclusive, morton_claim;
   MTensor densify_random_samples;
 
   MTensor radii;

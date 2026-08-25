@@ -72,6 +72,19 @@ std::tuple<MTensor, float> msplat_train_step(
     float inv_max_dim
 );
 
+// Counting sort of the gaussian arrays by Morton code of position. A permutation
+// of an unordered set, so the scene is unchanged; it makes the per-gaussian
+// stages address memory coherently.
+void msplat_morton_reorder(
+    int N, const float origin[3], const float inv_extent[3],
+    MTensor &means_buf, MTensor &scales_buf, MTensor &quats_buf,
+    MTensor &featuresDc_buf, MTensor &featuresRest_buf, MTensor &opacities_buf,
+    int fr_stride,
+    MTensor adam_exp_avg_buf[], MTensor adam_exp_avg_sq_buf[],
+    MTensor &bucket, MTensor &perm, MTensor &counts, MTensor &inclusive,
+    MTensor &claim, MTensor &block_totals, MTensor &scratch
+);
+
 int msplat_densify(
     int N, int buf_capacity,
     float grad_thresh, float size_thresh, float screen_thresh, int check_screen,
