@@ -1,0 +1,15 @@
+{
+  "originHash" : "a7bf24fb4a21b2cdcfe109b56ab171b730d9ff637218ec61e4c7311c3d3facf6",
+  "pins" : [
+    {
+      "identity" : "nlohmann_json",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/NewChromantics/nlohmann_json",
+      "state" : {
+        "branch" : "graham/FixSwiftPackage",
+        "revision" : "814ea589f79307b6470535f9f7d3a6d94474547b"
+      }
+    }
+  ],
+  "version" : 3
+}

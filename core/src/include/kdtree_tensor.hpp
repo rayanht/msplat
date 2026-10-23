@@ -1,7 +1,7 @@
 #ifndef KDTREE_TENSOR_H
 #define KDTREE_TENSOR_H
 
-#include <nanoflann.hpp>
+#include "nanoflann.hpp"
 #include <vector>
 #include <cmath>
 

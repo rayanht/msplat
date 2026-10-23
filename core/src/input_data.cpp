@@ -1,7 +1,7 @@
 #include "input_data.hpp"
 #include "loaders.hpp"
 #include "msplat.hpp"
-#include <nlohmann/json.hpp>
+#include "json.hpp"	//	nlohmann/
 #include <filesystem>
 #include <fstream>
 #include <iostream>

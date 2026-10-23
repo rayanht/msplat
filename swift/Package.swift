@@ -7,17 +7,17 @@ let package = Package(
     products: [
         .library(name: "Msplat", targets: ["Msplat"]),
     ],
+    dependencies: [
+        .package(path: "../core"),
+    ],
     targets: [
-        // Pre-built core library (run scripts/build-xcframework.sh to generate)
-        .binaryTarget(
-            name: "MsplatCore",
-            path: "../MsplatCore.xcframework"
-        ),
 
         // Swift API
         .target(
             name: "Msplat",
-            dependencies: ["MsplatCore"],
+            dependencies: [
+                .product(name: "MsplatCore", package: "core")
+            ],
             path: "Sources/Msplat",
             resources: [.copy("Resources/default.metallib")],
             linkerSettings: [

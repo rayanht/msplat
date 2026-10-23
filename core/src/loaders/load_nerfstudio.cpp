@@ -1,5 +1,5 @@
 #include "loaders.hpp"
-#include <nlohmann/json.hpp>
+#include <json.hpp>
 #include <fstream>
 #include <filesystem>
 #include <algorithm>

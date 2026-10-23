@@ -26,6 +26,7 @@ swift/Sources/Msplat/Resources/
 .idea/
 *.swp
 .DS_Store
+xcuserdata/
 
 # Spec (internal)
 SPEC.md
@@ -48,3 +49,4 @@ demo/.build/
 
 # GPU traces
 *.gputrace
+

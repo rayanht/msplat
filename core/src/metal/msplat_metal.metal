@@ -11,6 +11,57 @@ using namespace metal;
 #define CHANNELS 3
 #define MAX_REGISTER_CHANNELS 3
 
+//	in xcode via swift[pm] atomc_float isn't being found
+using atomic_float = atomic<float>;
+
+
+// Helper function for atomic float addition using compare-and-swap
+inline void atomic_add_float(device float* addr, float value) {
+	device atomic_uint* atomic_addr = (device atomic_uint*)addr;
+	uint old_val, new_val;
+	do {
+		old_val = atomic_load_explicit(atomic_addr, memory_order_relaxed);
+		new_val = as_type<uint>(as_type<float>(old_val) + value);
+	} while (!atomic_compare_exchange_weak_explicit(
+													atomic_addr, &old_val, new_val,
+													memory_order_relaxed, memory_order_relaxed
+													));
+}
+
+// Overload atomic_fetch_add_explicit for atomic<float> using compare-and-swap
+// Note: Metal requires memory_order to be a compile-time constant, so we use memory_order_relaxed
+inline float atomic_fetch_add_explicit(device atomic<float>* addr, float value, memory_order order) {
+	device atomic_uint* atomic_addr = (device atomic_uint*)addr;
+	uint old_val, new_val;
+	float old_float;
+	do {
+		old_val = atomic_load_explicit(atomic_addr, memory_order_relaxed);
+		old_float = as_type<float>(old_val);
+		new_val = as_type<uint>(old_float + value);
+	} while (!atomic_compare_exchange_weak_explicit(
+													atomic_addr, &old_val, new_val,
+													memory_order_relaxed, memory_order_relaxed
+													));
+	return old_float;
+}
+
+// Overload for device float* (non-atomic pointer) - treats it as atomic<float>*
+inline float atomic_fetch_add_explicit(device float* addr, float value, memory_order order) {
+	device atomic_uint* atomic_addr = (device atomic_uint*)addr;
+	uint old_val, new_val;
+	float old_float;
+	do {
+		old_val = atomic_load_explicit(atomic_addr, memory_order_relaxed);
+		old_float = as_type<float>(old_val);
+		new_val = as_type<uint>(old_float + value);
+	} while (!atomic_compare_exchange_weak_explicit(
+													atomic_addr, &old_val, new_val,
+													memory_order_relaxed, memory_order_relaxed
+													));
+	return old_float;
+}
+
+
 constant float SH_C0 = 0.28209479177387814f;
 constant float SH_C1 = 0.4886025119029199f;
 constant float SH_C2[] = {
@@ -907,10 +958,10 @@ kernel void rasterize_backward_kernel(
     constant float* final_Ts,
     constant int* final_index,
     constant float* v_output, // float3
-    device atomic_float* v_xy, // float2
-    device atomic_float* v_conic, // float3
-    device atomic_float* v_rgb, // float3
-    device atomic_float* v_opacity,
+    device float* v_xy, // float2
+    device float* v_conic, // float3
+    device atomic<float>* v_rgb, // float3
+    device atomic<float>* v_opacity,
     uint3 gp [[thread_position_in_grid]],
     uint3 blockIdx [[threadgroup_position_in_grid]],
     uint tr [[thread_index_in_threadgroup]],
@@ -1118,10 +1169,10 @@ kernel void nd_rasterize_backward_kernel(
     constant float* final_Ts,
     constant int* final_index,
     constant float* v_output,
-    device atomic_float* v_xy, // float2
-    device atomic_float* v_conic, // float3
-    device atomic_float* v_rgb,
-    device atomic_float* v_opacity,
+    device atomic<float>* v_xy, // float2
+    device atomic<float>* v_conic, // float3
+    device atomic<float>* v_rgb,
+    device atomic<float>* v_opacity,
     device float* workspace,
     uint3 blockIdx [[threadgroup_position_in_grid]],
     uint3 blockDim [[threads_per_threadgroup]],
@@ -2052,7 +2103,7 @@ kernel void scatter_to_prealloc_bins_kernel(
     for (uint i = tile_min.y; i < tile_max.y; i++) {
         for (uint j = tile_min.x; j < tile_max.x; j++) {
             uint tile_id = i * tile_bounds.x + j;
-            uint pos = atomic_fetch_add_explicit(&scatter_counters[tile_id], 1u, memory_order_relaxed);
+            uint pos = atomic_fetch_add_explicit(scatter_counters + tile_id, 1u, memory_order_relaxed);
             if (pos >= MAX_TILE_ELEMS) {
                 // Clamp counter so prefix_sum sees at most MAX_TILE_ELEMS
                 atomic_store_explicit(&scatter_counters[tile_id], MAX_TILE_ELEMS, memory_order_relaxed);
@@ -2180,7 +2231,7 @@ kernel void radix_sort_histogram_kernel(
     uint global_idx = bid * RS_TG_SIZE + tid;
     if (global_idx < N) {
         uint digit = extract_bits((uint64_t)keys_in[global_idx], shift, 8);
-        atomic_fetch_add_explicit(&local_hist[digit], 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(local_hist + digit, 1, memory_order_relaxed);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -2461,7 +2512,7 @@ kernel void fused_loss_forward_kernel(
     constant uint2& img_size,       // (W, H)
     constant float& ssim_weight,
     device float* intermediates,    // (H, W, 15) — 5 values × 3 channels per pixel
-    device atomic_float* loss_sum,  // scalar: atomic sum of all pixel losses
+    device atomic<float>* loss_sum,  // scalar: atomic sum of all pixel losses
     uint2 gid [[thread_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
     uint2 tg_size [[threads_per_threadgroup]]
@@ -2862,10 +2913,10 @@ kernel void rasterize_backward_chunked_kernel(
     constant float* chunk_T_buf,    // [K_max, H, W]
     constant float* after_C_buf,    // [K_max, H, W, 3]
     constant float* v_output,
-    device atomic_float* v_xy,
-    device atomic_float* v_conic,
-    device atomic_float* v_rgb,
-    device atomic_float* v_opacity,
+    device atomic<float>* v_xy,
+    device atomic<float>* v_conic,
+    device atomic<float>* v_rgb,
+    device atomic<float>* v_opacity,
     constant uint& chunk_size,
     constant uint& K_max,
     uint3 gp [[thread_position_in_grid]],
@@ -3135,7 +3186,7 @@ kernel void ssim_v_fwd_kernel(
     constant uint2& img_size,       // (W, H)
     constant float& ssim_weight,
     device float* intermediates,    // (H, W, 15)
-    device atomic_float* loss_sum,
+    device atomic<float>* loss_sum,
     uint2 gid [[thread_position_in_grid]],
     uint2 lid [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]],
@@ -3238,7 +3289,7 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
     constant float* rendered, constant float* gt,
     constant float* ssim_h_buf, constant uint2& img_size,
     constant float& ssim_weight, constant float& inv_n,
-    device float* deriv_h_buf, device atomic_float* loss_sum,
+    device float* deriv_h_buf, device atomic<float>* loss_sum,
     uint2 gid [[thread_position_in_grid]], uint2 lid [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]], uint2 tgid [[threadgroup_position_in_grid]],
     uint2 tg_size [[threads_per_threadgroup]]

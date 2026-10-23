@@ -1,5 +1,5 @@
 #include "loaders.hpp"
-#include <nlohmann/json.hpp>
+#include <json.hpp>	//	now as a SPM dependency, the path nlohmann/ disapears
 #include <fstream>
 #include <filesystem>
 #include <algorithm>

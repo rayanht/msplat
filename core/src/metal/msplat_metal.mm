@@ -48,7 +48,9 @@ struct MetalContext {
     id<MTLCommandBuffer> getCommandBuffer() {
         if (!_currentCB) {
             _currentCB = [MPSCommandBuffer commandBufferFromCommandQueue:queue];
+#if !__has_feature(objc_arc)
             [_currentCB retain];
+#endif
         }
         return _currentCB;
     }
@@ -70,7 +72,9 @@ struct MetalContext {
         if (_currentCB) {
             [_currentCB commit];
             [_currentCB waitUntilCompleted];
+#if !__has_feature(objc_arc)
             [_currentCB release];
+#endif
             _currentCB = nil;
         }
     }
@@ -221,7 +225,9 @@ MetalContext* init_msplat_metal_context() {
             return nil;
         }
         id<MTLComputePipelineState> pso = [ctx->device newComputePipelineStateWithFunction:fn error:&error];
+#if !__has_feature(objc_arc)
         [fn release];
+#endif
         if (error) {
             fprintf(stderr, "msplat: failed to create pipeline for %s: %s\n",
                     [name UTF8String], [[error description] UTF8String]);
@@ -262,7 +268,9 @@ MetalContext* init_msplat_metal_context() {
     ctx->compact_scatter_kernel_cpso              = load(@"compact_scatter_kernel");
     ctx->compact_copy_back_kernel_cpso            = load(@"compact_copy_back_kernel");
 
+#if !__has_feature(objc_arc)
     [metal_library release];
+#endif
 
     // Initialize counter sampling if PROFILE_STAGES is set
     ctx->counterSampleBuffer = nil;
@@ -337,7 +345,9 @@ bool msplat_begin_gpu_capture(const char* path) {
 
     NSError *err = nil;
     BOOL ok = [mgr startCaptureWithDescriptor:desc error:&err];
+#if !__has_feature(objc_arc)
     [desc release];
+#endif
     if (!ok) {
         fprintf(stderr, "msplat: startCapture failed: %s\n",
                 err ? err.localizedDescription.UTF8String : "unknown error");
